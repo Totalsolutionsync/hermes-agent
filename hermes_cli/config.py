@@ -1376,9 +1376,26 @@ DEFAULT_CONFIG = {
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
         # External memory provider plugin (empty = built-in only).
         # Set to a provider name to activate: "openviking", "mem0",
-        # "hindsight", "holographic", "retaindb", "byterover".
+        # "hindsight", "holographic", "retaindb", "byterover", "kynver".
         # Only ONE external provider is allowed at a time.
+        # When Kynver AgentOS is configured and healthy, ``kynver`` is selected
+        # automatically unless another provider is explicitly set.
         "provider": "",
+        # Explicit opt-out of auto Kynver memory (substrate may still wire todo/sessions).
+        "kynver_disabled": False,
+    },
+
+    # Kynver AgentOS operating substrate (Forge). Default-on when credentials +
+    # health check pass; explicit opt-out via kynver.disabled or KYNVER_DISABLED.
+    "kynver": {
+        "disabled": False,
+        "allow_local_fallback": True,
+        "plan_id": "",
+        "plan_version_id": "",
+        "task_id": "",
+        "progress_row_key": "",
+        "goal_id": "",
+        "project_id": "",
     },
 
     # Subagent delegation — override the provider:model used by delegate_task

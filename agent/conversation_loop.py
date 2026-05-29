@@ -502,6 +502,13 @@ def run_conversation(
         _msg_preview,
     )
 
+    try:
+        from plugins.memory.kynver.integration import on_conversation_start as _kynver_turn_start
+
+        _kynver_turn_start(agent, user_message if isinstance(user_message, str) else "")
+    except Exception:
+        pass
+
     # Initialize conversation (copy to avoid mutating the caller's list)
     messages = list(conversation_history) if conversation_history else []
 

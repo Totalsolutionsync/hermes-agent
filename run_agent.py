@@ -2261,6 +2261,12 @@ class AIAgent:
                 self._memory_manager.shutdown_all()
             except Exception:
                 pass
+        try:
+            from plugins.memory.kynver.integration import on_session_boundary as _kynver_session_end
+
+            _kynver_session_end(self, messages or [])
+        except Exception:
+            pass
         # Notify context engine of session end (flush DAG, close DBs, etc.)
         if hasattr(self, "context_compressor") and self.context_compressor:
             try:
@@ -2281,6 +2287,12 @@ class AIAgent:
                 self._memory_manager.on_session_end(messages or [])
             except Exception:
                 pass
+        try:
+            from plugins.memory.kynver.integration import on_session_boundary as _kynver_session_end
+
+            _kynver_session_end(self, messages or [])
+        except Exception:
+            pass
         # Notify context engine of session end too — same lifecycle moment as
         # the memory manager's on_session_end. Without this, engines that
         # accumulate per-session state (DAGs, summaries) leak that state from

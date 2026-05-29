@@ -1040,16 +1040,23 @@ def init_agent(
         "max_tokens": max_tokens,
     }
     
-    # In-memory todo list for task planning (one per agent/session)
-    from tools.todo_tool import TodoStore
-    agent._todo_store = TodoStore()
-    
-    # Load config once for memory, skills, and compression sections
+    # Load config once for memory, skills, compression, and Kynver operating substrate
     try:
         from hermes_cli.config import load_config as _load_agent_config
         _agent_cfg = _load_agent_config()
     except Exception:
         _agent_cfg = {}
+
+    # Todo store — Kynver AgentOS projection when substrate is active, else local
+    from tools.todo_tool import TodoStore
+    agent._todo_store = TodoStore()
+    if not skip_memory:
+        try:
+            from plugins.memory.kynver.integration import configure_agent as _configure_kynver
+
+            _configure_kynver(agent, _agent_cfg, platform=platform, skip_memory=skip_memory)
+        except Exception as _kynver_cfg_err:
+            _ra().logger.debug("Kynver operating substrate init skipped: %s", _kynver_cfg_err)
     try:
         agent._tool_guardrails = ToolCallGuardrailController(
             ToolCallGuardrailConfig.from_mapping(
@@ -1094,6 +1101,17 @@ def init_agent(
     if not skip_memory:
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
+            try:
+                from plugins.memory.kynver.integration import (
+                    resolve_memory_provider_for_init as _resolve_kynver_mem,
+                )
+
+                _mem_provider_name = _resolve_kynver_mem(
+                    mem_config or {},
+                    _agent_cfg,
+                ) or _mem_provider_name
+            except Exception:
+                pass
 
             if _mem_provider_name and _mem_provider_name.strip():
                 from agent.memory_manager import MemoryManager as _MemoryManager
@@ -1136,6 +1154,14 @@ def init_agent(
                     # Thread gateway session key for stable per-chat Honcho session isolation
                     if agent._gateway_session_key:
                         _init_kwargs["gateway_session_key"] = agent._gateway_session_key
+                    try:
+                        from plugins.memory.kynver.integration import (
+                            memory_provider_init_kwargs as _kynver_mem_kwargs,
+                        )
+
+                        _init_kwargs.update(_kynver_mem_kwargs(agent))
+                    except Exception:
+                        pass
                     # Profile identity for per-profile provider scoping
                     try:
                         from hermes_cli.profiles import get_active_profile_name
