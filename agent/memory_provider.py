@@ -2,7 +2,8 @@
 
 Plugins ship in ``plugins/memory/<name>/``, activated via ``memory.provider`` (ONE external
 provider at a time). Lifecycle, driven by MemoryManager: initialize -> system_prompt_block /
-prefetch / sync_turn per turn -> tool dispatch -> shutdown, plus optional ``on_*`` hooks.
+prefetch / sync_turn per turn -> tool dispatch -> shutdown, plus optional ``on_*`` hooks
+(``on_tool_observed`` sees agent-loop tools that bypass the registry).
 """
 
 from __future__ import annotations
@@ -199,6 +200,15 @@ class MemoryProvider(ABC):
         or batch; each batch operation sees the preceding operation's result. Older
         callers may omit this field: ``old_text`` alone is not authoritative identity.
         """
+
+    def on_tool_observed(self, tool_name: str, args: Dict[str, Any], result: Any,
+                         metadata: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Observe a completed agent-loop tool (``todo_list``, ``memory``, ``delegate_task``,
+        ``session_search``). These bypass registry dispatch, so ``post_tool_call`` plugins never
+        see their live agent state. Return a small JSON-serializable dict to annotate the tool
+        result's ``observer_metadata``, or None. Built-in memory writes are mirrored separately
+        through ``on_memory_write``."""
+        return None
 
     def backup_paths(self) -> List[str]:
         """Absolute paths of provider state OUTSIDE HERMES_HOME for ``hermes backup``/``import``

@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -517,7 +518,12 @@ def _memory_parts(agent: Any) -> List[str]:
     the same check ``inject_memory_provider_tools`` uses, so we never advertise
     tools the toolset config gated off)."""
     parts: List[str] = []
-    if agent._memory_store:
+    _authoritative = False
+    if agent._memory_manager:
+        with suppress(Exception):
+            _authoritative = agent._memory_manager.has_authoritative_provider()
+    # An authoritative provider (Kynver AgentOS) owns the memory substrate; built-in blocks yield.
+    if agent._memory_store and not _authoritative:
         for enabled, kind in ((agent._memory_enabled, "memory"), (agent._user_profile_enabled, "user")):
             block = agent._memory_store.format_for_system_prompt(kind) if enabled else None
             if block:

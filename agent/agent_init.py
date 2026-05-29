@@ -1334,6 +1334,12 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
     elif not skip_memory:
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
+            if not str(_mem_provider_name or "").strip():
+                # Unset provider + Kynver AgentOS enabled -> Kynver is the provider.
+                with suppress(Exception):
+                    from plugins.memory.kynver.agentos_bridge import agentos_enabled as _kynver_enabled
+                    if _kynver_enabled():
+                        _mem_provider_name = "kynver"
             if not is_core_memory_provider(_mem_provider_name):
                 from agent.memory_manager import MemoryManager as _MemoryManager
                 from plugins.memory import load_memory_provider as _load_mem

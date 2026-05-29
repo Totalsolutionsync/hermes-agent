@@ -201,3 +201,32 @@ def test_aiagent_reuses_handed_in_memory_manager_without_reinitializing():
     assert second._memory_manager is manager
     assert load_memory_provider.call_count == 1
     assert provider.init_session_id is None
+
+
+def test_kynver_agentos_auto_enables_when_configured():
+    provider = RecordingMemoryProvider()
+    cfg = {"memory": {"provider": ""}, "agent": {}}
+
+    with (
+        patch("hermes_cli.config.load_config", return_value=cfg), patch("hermes_cli.config.load_config_readonly", return_value=cfg),
+        patch("plugins.memory.kynver.agentos_bridge.agentos_enabled", return_value=True),
+        patch("plugins.memory.load_memory_provider", return_value=provider) as load_memory_provider,
+        patch("agent.model_metadata.get_model_context_length", return_value=204_800),
+        patch("model_tools.get_tool_definitions", return_value=[]),
+        patch("model_tools.check_toolset_requirements", return_value={}),
+        patch("agent.process_bootstrap.OpenAI"),
+    ):
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=False,
+            session_id="sess-kynver",
+        )
+
+    load_memory_provider.assert_called_once_with("kynver")
+    assert agent._memory_manager is not None
+    assert provider.init_session_id == "sess-kynver"

@@ -10,6 +10,7 @@ lazily at call time so ``patch("tools.x.y")`` in tests keeps working.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -231,20 +232,44 @@ def _setup_mcp_shim(agent, args: dict, ctx: InlineToolContext) -> Any:
     }, ctx)
 
 
+def observed_inline_result(agent, function_name: str, args: dict, ctx: InlineToolContext, result: Any,
+                           *, duration_ms: int = 0) -> Any:
+    """Run agent-loop observers (memory providers + ``agent_loop_tool_observed`` plugins) on an
+    inline tool's result and append their ``observer_metadata`` annotations. These tools never
+    reach registry dispatch, so this is the only point providers can see them."""
+    from agent.agent_loop_observer import append_observer_metadata, notify_agent_loop_tool
+
+    annotations = notify_agent_loop_tool(
+        agent, function_name, args, result,
+        task_id=ctx.effective_task_id or "", tool_call_id=ctx.tool_call_id or "", duration_ms=duration_ms,
+    )
+    return append_observer_metadata(result, annotations)
+
+
+def _observed(function_name: str, executor: InlineToolExecutor) -> InlineToolExecutor:
+    def _exec(agent, args: dict, ctx: InlineToolContext) -> Any:
+        started = time.monotonic()
+        result = executor(agent, args, ctx)
+        return observed_inline_result(
+            agent, function_name, args, ctx, result, duration_ms=int((time.monotonic() - started) * 1000),
+        )
+    return _exec
+
+
 # Order is the historical if/elif order of ``execute_tool_calls_sequential``.
 INLINE_TOOL_EXECUTORS: Dict[str, InlineToolExecutor] = {
-    "todo_list": _tool(
+    "todo_list": _observed("todo_list", _tool(
         "tools.todo_tool", "todo_tool", ("todos", "todos"), ("merge", "merge", False),
         store=lambda agent, ctx: agent._todo_store,
-    ),
+    )),
     # Bot Mode teammate DM is injected, not registered: only a canonical Bot
     # Chat session carries the schema, and the tool re-gates on the title.
     "message_agent": _tool(
         "tools.bot_mode_dm", "message_agent_tool", ("target", "target", ""), ("message", "message", ""),
         task_id=lambda agent, ctx: ctx.effective_task_id, agent=lambda agent, ctx: agent,
     ),
-    "session_search": _session_search,
-    "memory": _memory,
+    "session_search": _observed("session_search", _session_search),
+    "memory": _observed("memory", _memory),
     "clarify": _tool(
         "tools.clarify_tool", "clarify_tool",
         ("question", "question", ""), ("choices", "choices"), ("multi_select", "multi_select", False),
@@ -276,7 +301,7 @@ INLINE_TOOL_EXECUTORS: Dict[str, InlineToolExecutor] = {
     "manage_connections": _manage_connections,
     "manage_catalog": _manage_catalog,
     "setup_mcp": _setup_mcp_shim,
-    "delegate_task": lambda agent, args, ctx: agent._dispatch_delegate_task(args),
+    "delegate_task": _observed("delegate_task", lambda agent, args, ctx: agent._dispatch_delegate_task(args)),
 }
 
 # ``invoke_tool`` (concurrent path) consults the memory manager right after these three

@@ -434,6 +434,17 @@ class MemoryManager:
     def get_provider(self, name: str) -> Optional[MemoryProvider]:
         return next((p for p in self._providers if p.name == name), None)
 
+    def has_authoritative_provider(self) -> bool:
+        """True when a provider owns the prompt memory substrate (built-in MEMORY/USER blocks yield)."""
+        def _authoritative(provider: MemoryProvider) -> bool:
+            checker = getattr(provider, "is_authoritative_context", None)
+            if callable(checker):
+                return bool(checker())
+            return bool(getattr(provider, "authoritative_context", False))
+
+        return any(self._each_provider("authoritative check failed", _authoritative))
+
+
     def build_system_prompt(self) -> str:
         """Join every provider's non-empty ``system_prompt_block()`` with blank lines."""
         blocks = self._each_provider("system_prompt_block() failed", lambda p: p.system_prompt_block(),
@@ -838,6 +849,18 @@ class MemoryManager:
                 self.on_memory_write(action, target, str(op.get("content") or op.get("new_text") or ""), metadata=metadata)
             except Exception as e:
                 logger.debug("notify_memory_tool_write failed for op %s: %s", action, e)
+
+    def on_tool_observed(self, tool_name: str, args: Dict[str, Any], result: Any,
+                         metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Notify external providers after an agent-loop tool completes; returns the dict
+        annotations they produced for the caller to append to the tool result."""
+        external = [p for p in self._providers if p.name != "builtin"]
+        annotations = self._each_provider(
+            "on_tool_observed failed",
+            lambda p: p.on_tool_observed(tool_name, dict(args or {}), result, metadata=dict(metadata or {})),
+            providers=external,
+        )
+        return [a for a in annotations if isinstance(a, dict)]
 
     def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs) -> None:
         self._each_provider(
