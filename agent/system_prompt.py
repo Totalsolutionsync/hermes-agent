@@ -780,6 +780,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # Skills are runtime-mutable, so the index leads the volatile band: on a longest-prefix
     # backend an unchanged index stays inside the reused prefix; a changed one re-prefills from here.
     volatile_parts: List[str] = [skills_prompt, *_memory_parts(agent)]
+    # Plugin operating-context blocks (Kynver todo substrate / degraded notice); built once per prompt build.
+    with suppress(Exception):
+        from agent.operating_prompt import collect_operating_prompt_blocks
+        volatile_parts.extend(collect_operating_prompt_blocks(agent))
     # Plugin sections are confined to one coarse anchor in the volatile tail so
     # a resumed process can reconstruct the stable prefix without re-running plugins.
     volatile_parts.extend(_plugin_section_blocks(_frozen_plugin_prompt_sections(agent), "after_memory"))

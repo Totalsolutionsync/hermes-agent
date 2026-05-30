@@ -2468,6 +2468,10 @@ def init_agent(
     except Exception:
         _agent_cfg = {}
 
+    # Memory plugins (Kynver AgentOS) may replace the default local todo store.
+    from agent.todo_store_provider import init_todo_store
+    init_todo_store(agent, _agent_cfg, platform=platform)
+
     _apply_display_config(agent, _agent_cfg, platform)
     _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=memory_manager)
     _apply_agent_section(agent, _agent_cfg)
