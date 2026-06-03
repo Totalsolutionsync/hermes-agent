@@ -139,6 +139,29 @@ def test_todo_mirror_skips_read_back_only_terminal_promotion():
     assert not [call for call in client.calls if call[1] == "/tasks"]
 
 
+def test_todo_mirror_skips_task_plane_when_kynver_plan_progress_store_already_projected():
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="cli")
+    result = json.dumps({"todos": [{"id": "1", "content": "Ship", "status": "completed"}]})
+
+    annotation = provider.on_tool_observed(
+        "todo",
+        {"merge": True},
+        result,
+        {"todo_store_provider": "kynver_plan_progress"},
+    )
+
+    assert annotation == {
+        "provider": "kynver",
+        "todo_mirror": "plan_progress_observed",
+        "task_plane_updates": 0,
+    }
+    assert not [call for call in client.calls if call[1] == "/tasks"]
+
+
 def test_todo_mirror_failure_is_degraded_metadata_without_secret_leak():
     from plugins.memory.kynver import KynverMemoryProvider
 

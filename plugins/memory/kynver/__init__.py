@@ -510,6 +510,12 @@ class KynverMemoryProvider(MemoryProvider):
     ) -> Optional[Dict[str, Any]]:
         if self._tasks_disabled or self._observe_only:
             return {"provider": "kynver", "todo_mirror": "observed", "durable": False}
+        if metadata.get("todo_store_provider") == "kynver_plan_progress":
+            return {
+                "provider": "kynver",
+                "todo_mirror": "plan_progress_observed",
+                "task_plane_updates": 0,
+            }
         try:
             payload = json.loads(result) if isinstance(result, str) else result
             todos = payload.get("todos", []) if isinstance(payload, dict) else []

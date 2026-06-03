@@ -42,6 +42,10 @@ def notify_agent_loop_tool(
         "tool_call_id": tool_call_id or "",
         "duration_ms": int(duration_ms or 0),
     }
+    if tool_name == "todo":
+        todo_store = getattr(agent, "_todo_store", None)
+        if todo_store.__class__.__name__ == "KynverTodoStore":
+            metadata["todo_store_provider"] = "kynver_plan_progress"
     try:
         if hasattr(agent, "_build_memory_write_metadata"):
             metadata.update(

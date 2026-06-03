@@ -144,6 +144,32 @@ def test_agent_loop_observer_can_annotate_todo_result():
     assert annotated["observer_metadata"] == [{"provider": "test", "todo_mirror": "synced"}]
 
 
+def test_agent_loop_observer_marks_kynver_plan_progress_todo_store():
+    from agent.agent_loop_observer import notify_agent_loop_tool
+
+    seen = []
+
+    class Manager:
+        def on_tool_observed(self, tool_name, args, result, metadata=None):
+            seen.append(metadata)
+            return []
+
+    class KynverTodoStore:
+        pass
+
+    agent = SimpleNamespace(
+        _memory_manager=Manager(),
+        _todo_store=KynverTodoStore(),
+        session_id="sess-1",
+        _parent_session_id="",
+        platform="cli",
+    )
+
+    notify_agent_loop_tool(agent, "todo", {"merge": True}, json.dumps({"todos": []}))
+
+    assert seen[0]["todo_store_provider"] == "kynver_plan_progress"
+
+
 def test_agent_loop_observer_covers_memory_delegate_and_session_search():
     from agent.agent_loop_observer import notify_agent_loop_tool
 
