@@ -852,6 +852,9 @@ def skill_view(
     file_path: str = None,
     task_id: str = None,
     preprocess: bool = True,
+    section: str = None,
+    max_bytes: int = None,
+    summary: bool = False,
 ) -> str:
     """
     View the content of a skill or a specific file within a skill directory.
@@ -864,6 +867,9 @@ def skill_view(
         preprocess: Apply configured SKILL.md template and inline shell rendering
             to main skill content. Internal slash/preload callers disable this
             because they render the skill message themselves.
+        section: Optional markdown section title to load instead of the full SKILL.md body.
+        max_bytes: Optional UTF-8 byte budget; non-mandatory sections may truncate.
+        summary: When True (and file_path is omitted), return metadata + section index only.
 
     Returns:
         JSON string with skill content or error message
@@ -1364,13 +1370,55 @@ def skill_view(
                     exc_info=True,
                 )
 
-        rendered_content = content
+        from tools.skill_sections import (
+            build_section_index,
+            extract_section_content,
+            get_mandatory_sections,
+            truncate_sections,
+        )
+
+        mandatory_sections = get_mandatory_sections(frontmatter)
+        section_index = build_section_index(content)
+
+        if summary and not file_path:
+            return json.dumps(
+                {
+                    "success": True,
+                    "name": skill_name,
+                    "description": frontmatter.get("description", ""),
+                    "summary": True,
+                    "sections": section_index,
+                    "linked_files": linked_files if linked_files else None,
+                    "mandatory_sections": sorted(mandatory_sections),
+                    "usage_hint": (
+                        "Call skill_view(name, section='Section Title') for a section, "
+                        "or omit summary for full SKILL.md."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+
+        working_content = content
+        if section and not file_path:
+            section_body = extract_section_content(content, section)
+            if section_body is None:
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": f"Section '{section}' not found in skill '{skill_name}'.",
+                        "sections": section_index,
+                    },
+                    ensure_ascii=False,
+                )
+            working_content = section_body
+
+        rendered_content = working_content
         if preprocess:
             try:
                 from agent.skill_preprocessing import preprocess_skill_content
 
                 rendered_content = preprocess_skill_content(
-                    content,
+                    working_content,
                     skill_dir,
                     session_id=task_id,
                 )
@@ -1379,6 +1427,14 @@ def skill_view(
                     "Could not preprocess skill content for %s", skill_name, exc_info=True
                 )
 
+        truncated = False
+        if max_bytes is not None and not file_path:
+            rendered_content, truncated = truncate_sections(
+                rendered_content,
+                max_bytes=int(max_bytes),
+                mandatory_sections=mandatory_sections,
+            )
+
         result = {
             "success": True,
             "name": skill_name,
@@ -1386,6 +1442,10 @@ def skill_view(
             "tags": tags,
             "related_skills": related_skills,
             "content": rendered_content,
+            "sections": section_index if not file_path else None,
+            "section": section if section and not file_path else None,
+            "truncated": truncated if max_bytes is not None else False,
+            "mandatory_sections": sorted(mandatory_sections) if not file_path else None,
             "path": rel_path,
             "skill_dir": str(skill_dir) if skill_dir else None,
             "linked_files": linked_files if linked_files else None,
@@ -1517,6 +1577,18 @@ SKILL_VIEW_SCHEMA = {
                 "type": "string",
                 "description": "OPTIONAL: Path to a linked file within the skill (e.g., 'references/api.md', 'templates/config.yaml', 'scripts/validate.py'). Omit to get the main SKILL.md content.",
             },
+            "section": {
+                "type": "string",
+                "description": "OPTIONAL: Markdown section title from SKILL.md (e.g. 'When to Use'). Loads only that section.",
+            },
+            "max_bytes": {
+                "type": "integer",
+                "description": "OPTIONAL: UTF-8 byte budget for SKILL.md content. Mandatory sections are never truncated.",
+            },
+            "summary": {
+                "type": "boolean",
+                "description": "When true, return metadata + section index without full SKILL.md body.",
+            },
         },
         "required": ["name"],
     },
@@ -1537,7 +1609,12 @@ def _skill_view_with_bump(args, **kw):
     telemetry failure never breaks the tool call."""
     name = args.get("name", "")
     result = skill_view(
-        name, file_path=args.get("file_path"), task_id=kw.get("task_id")
+        name,
+        file_path=args.get("file_path"),
+        task_id=kw.get("task_id"),
+        section=args.get("section"),
+        max_bytes=args.get("max_bytes"),
+        summary=bool(args.get("summary")),
     )
     try:
         parsed = json.loads(result)
