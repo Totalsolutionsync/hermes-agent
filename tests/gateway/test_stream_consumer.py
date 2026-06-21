@@ -1115,6 +1115,40 @@ class TestEditOverflowSplitAndDeliver:
         # the new continuation (per the openclaw #32535 lesson).
         assert new_msg_count[0] == 1
 
+    @pytest.mark.asyncio
+    async def test_partial_overflow_split_enters_fallback_without_resending_chunk_one(self):
+        """When edit overflow stops after chunk 1, the consumer must enter
+        fallback mode with the delivered prefix so chunk 1 is not re-sent."""
+        adapter = MagicMock()
+        full_text = ("alpha-" * 800) + ("omega-" * 800)
+        chunks = [full_text[:4000] + " (1/2)", full_text[4000:] + " (2/2)"]
+        delivered_prefix = full_text[:4000]
+        adapter.edit_message = AsyncMock(return_value=SimpleNamespace(
+            success=True,
+            message_id="msg_initial",
+            continuation_message_ids=(),
+            overflow_partial=True,
+            delivered_content_prefix=delivered_prefix,
+        ))
+        adapter.send = AsyncMock(
+            return_value=SimpleNamespace(success=True, message_id="msg_tail"),
+        )
+        adapter.MAX_MESSAGE_LENGTH = 4096
+        adapter.truncate_message = MagicMock(return_value=chunks)
+
+        config = StreamConsumerConfig(edit_interval=0.01, buffer_threshold=5, cursor="")
+        consumer = GatewayStreamConsumer(adapter, "chat_999", config)
+        consumer._message_id = "msg_initial"
+        consumer._already_sent = True
+
+        ok = await consumer._send_or_edit(full_text, finalize=True)
+
+        assert ok is False
+        assert consumer._fallback_final_send is True
+        assert consumer._fallback_prefix == delivered_prefix
+        assert consumer._last_sent_text == delivered_prefix
+        adapter.send.assert_not_called()
+
 
 class TestInterimCommentaryMessages:
     @pytest.mark.asyncio

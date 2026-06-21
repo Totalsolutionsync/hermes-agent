@@ -902,6 +902,66 @@ class TestEditMessageStreamingSafety:
         assert all(kwargs.get("message_thread_id") == 17585 for kwargs in sent_kwargs)
         assert sent_kwargs[0]["reply_to_message_id"] == 456
 
+    @pytest.mark.asyncio
+    async def test_overflow_continuation_flood_control_retries_without_resending_chunk_one(self):
+        """Flood control on chunk 2 must retry that continuation only — not
+        re-edit chunk 1 or send duplicate copies of the first chunk."""
+        adapter = TelegramAdapter(PlatformConfig(enabled=True, token="fake-token"))
+        adapter._bot = MagicMock()
+        adapter._bot.edit_message_text = AsyncMock()
+        send_calls: list[str] = []
+
+        class FloodThenOk(Exception):
+            retry_after = 0.01
+
+        async def _fake_send(**kwargs):
+            text = kwargs.get("text", "")
+            send_calls.append(text)
+            if len(send_calls) == 1:
+                raise FloodThenOk("Flood control exceeded. Retry in 0.01 seconds")
+            return SimpleNamespace(message_id=1001)
+
+        adapter._bot.send_message = AsyncMock(side_effect=_fake_send)
+
+        oversized = "a" * 3000 + "b" * 3000
+        result = await adapter.edit_message("123", "456", oversized, finalize=False)
+
+        assert result.success is True
+        assert result.overflow_partial is False
+        assert adapter._bot.edit_message_text.await_count == 1
+        assert len(send_calls) == 2
+        assert all(" (2/2)" in call for call in send_calls)
+        assert " (1/2)" in adapter._bot.edit_message_text.await_args.kwargs["text"]
+        assert not any(" (1/2)" in call for call in send_calls)
+
+    @pytest.mark.asyncio
+    async def test_overflow_continuation_failure_reports_partial_prefix(self):
+        """When every continuation retry fails, report partial delivery so the
+        consumer can resume from chunk 2 instead of re-sending chunk 1."""
+        adapter = TelegramAdapter(PlatformConfig(enabled=True, token="fake-token"))
+        adapter._bot = MagicMock()
+        adapter._bot.edit_message_text = AsyncMock()
+
+        class FloodAlways(Exception):
+            retry_after = 0.01
+
+        adapter._bot.send_message = AsyncMock(side_effect=FloodAlways("Flood control"))
+
+        oversized = "a" * 3000 + "b" * 3000
+        result = await adapter.edit_message("123", "456", oversized, finalize=False)
+
+        chunks = adapter.truncate_message(
+            oversized, adapter.MAX_MESSAGE_LENGTH, len_fn=adapter.message_len_fn,
+        )
+        expected_prefix = adapter._overflow_delivered_content_prefix(oversized, chunks, 1)
+
+        assert result.success is True
+        assert result.overflow_partial is True
+        assert result.continuation_message_ids == ()
+        assert result.delivered_content_prefix == expected_prefix
+        assert adapter._bot.edit_message_text.await_count == 1
+        assert adapter._bot.send_message.await_count == 3
+
 # =========================================================================
 # Telegram guest mention gating
 # =========================================================================

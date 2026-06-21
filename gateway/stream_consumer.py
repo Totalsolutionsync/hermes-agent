@@ -1211,6 +1211,32 @@ class GatewayStreamConsumer:
                         finalize=finalize,
                     )
                     if result.success:
+                        _continuation_ids = getattr(result, "continuation_message_ids", ()) or ()
+                        _overflow_partial = getattr(result, "overflow_partial", False)
+                        _delivered_prefix = getattr(result, "delivered_content_prefix", None)
+                        if _overflow_partial:
+                            # Partial overflow split — chunk 1 (and maybe more)
+                            # landed but a continuation failed (e.g. flood
+                            # control).  Route the undelivered tail through
+                            # fallback so we resume at the next chunk instead
+                            # of re-sending chunk 1.
+                            if (
+                                _continuation_ids
+                                and result.message_id
+                                and result.message_id != self._message_id
+                            ):
+                                self._message_id = str(result.message_id)
+                                self._message_created_ts = time.monotonic()
+                                self._notify_new_message()
+                            if _delivered_prefix:
+                                self._last_sent_text = _delivered_prefix
+                                self._fallback_prefix = _delivered_prefix
+                            else:
+                                self._fallback_prefix = self._visible_prefix()
+                            self._fallback_final_send = True
+                            self._already_sent = True
+                            self._flood_strikes = 0
+                            return False
                         self._already_sent = True
                         # Adapter may have split-and-delivered an oversized
                         # edit across the original message + N continuations.
@@ -1223,7 +1249,6 @@ class GatewayStreamConsumer:
                         # below the new continuation, not the original.
                         # ``getattr`` with default keeps backwards compat with
                         # SimpleNamespace mocks in tests that pre-date the field.
-                        _continuation_ids = getattr(result, "continuation_message_ids", ()) or ()
                         if (
                             _continuation_ids
                             and result.message_id
