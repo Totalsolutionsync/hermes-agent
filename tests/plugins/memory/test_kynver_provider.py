@@ -1,4 +1,5 @@
 import json
+import pathlib
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -406,45 +407,20 @@ def test_system_prompt_suppresses_local_memory_after_kynver_recovers():
 # These tests prove the full KynverMemoryProvider pipeline handles the same
 # ContextEnvelope memory shape that the M3 lightweight provider consumes.
 # Fixture shape is pinned at:
-#   Kynver commit: fc5a46f10321e98f158241a49a37ed0611e1647a
-#   Hermes commit: f754cd517
-#   Plugin version: 1.0.0 (plugins/memory/kynver/plugin.yaml)
+#   Kynver PR #2130 merge SHA: 61b65e4681149d6ce335f17737715059493d1c4f
+#   Kynver PR #2130 head SHA:  7152742c183d1afb501c509338f61912f333d36f
+#   Hermes consuming head:     see SMOKE_EVIDENCE_M3_5.md
+#   Plugin version: 0.3.0 (plugins/memory/kynver/plugin.yaml)
 # ---------------------------------------------------------------------------
 
-# Inline equivalent of Kynver tests/plugins/memory/fixtures/kynver-context-envelope-contract-v1.json
-_M35_CONTRACT_FIXTURE = {
-    "_meta": {
-        "milestone": "M3.5",
-        "kynverCommit": "fc5a46f10321e98f158241a49a37ed0611e1647a",
-        "hermesCommit": "f754cd517",
-        "hermesPluginVersion": "1.0.0",
-        "kynverMcpAgentOsVersion": "0.3.50",
-    },
-    "contractVersion": "1.0",
-    "envelopeId": "env-m35-compat-fixture-v1",
-    "anchor": {"type": "session", "id": "hermes-compat-test-session", "exists": False},
-    "memories": [
-        {
-            "content": "Hermes Forge is the M3 dogfood adapter for Kynver context envelopes.",
-            "slug": "m3-dogfood-adapter",
-            "sourceId": "kynver:system",
-            "memoryType": "fact",
-        },
-        {
-            "content": "Kynver AgentOS/MARM is the authoritative context substrate for connected agents.",
-            "slug": "substrate-authority",
-            "sourceId": "kynver:system",
-            "memoryType": "fact",
-        },
-    ],
-    "recentSessions": [
-        {"summary": "Implemented M3 read-only Hermes context-envelope provider.", "id": "session-m3-impl"}
-    ],
-    "currentFocus": None,
-    "persona": None,
-    "followUps": [],
-    "generatedAt": "2026-06-27T00:00:00Z",
-}
+# Load canonical contract fixture from disk — shared with Kynver-side smoke tests.
+# Vendored at tests/plugins/memory/fixtures/kynver-context-envelope-contract-v1.json
+# (mirrors tests/plugins/memory/fixtures/kynver-context-envelope-contract-v1.json in Kynver repo).
+# Changing this file is a breaking contract change: bump contractVersion and update both repos.
+_FIXTURE_PATH = (
+    pathlib.Path(__file__).parent / "fixtures" / "kynver-context-envelope-contract-v1.json"
+)
+_M35_CONTRACT_FIXTURE = json.loads(_FIXTURE_PATH.read_text())
 
 
 def test_m35_compat_fixture_flows_through_full_provider_format_context():

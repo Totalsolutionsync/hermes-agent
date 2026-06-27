@@ -9,13 +9,15 @@
 
 | Artifact | Value |
 |----------|-------|
-| Kynver commit (M3.5 branch base) | `fc5a46f10321e98f158241a49a37ed0611e1647a` |
-| Hermes commit | `f754cd517` (test(kynver): isolate blank-provider memory init) |
-| Hermes plugin version (full operating) | `1.0.0` (`plugins/memory/kynver/plugin.yaml`) |
+| Kynver PR #2130 merge SHA | `61b65e4681149d6ce335f17737715059493d1c4f` |
+| Kynver PR #2130 head SHA (at review) | `7152742c183d1afb501c509338f61912f333d36f` |
+| Hermes consuming head | see git log — `feat/m3.5-compat-smoke` on Totalsolutionsync/hermes-agent |
+| Hermes plugin version (full operating) | `0.3.0` (`plugins/memory/kynver/plugin.yaml`) |
 | Kynver MCP AgentOS package | `@kynver-app/mcp-agent-os@0.3.50` |
 | Kynver Runtime package | `@kynver-app/runtime@0.1.158` |
 | Hermes profile config mode | `enabled` (`KYNVER_AGENTOS_MODE=enabled`) |
 | Kynver M3 plugin version | `0.3.0` (`Kynver: plugins/memory/kynver/plugin.yaml`) |
+| Contract fixture | `tests/plugins/memory/fixtures/kynver-context-envelope-contract-v1.json` (vendored, loaded at test time) |
 
 ---
 
@@ -26,7 +28,8 @@
 Contract fixture defines:
 - Required fields: `contractVersion`, `envelopeId`, `anchor`, `memories[*].content`, `memories[*].slug`
 - Optional: `recentSessions`, `currentFocus`, `persona`, `followUps`
-- Inline equivalent embedded in `test_kynver_provider.py` as `_M35_CONTRACT_FIXTURE`
+- Vendored at `tests/plugins/memory/fixtures/kynver-context-envelope-contract-v1.json` (loaded from disk by `_M35_CONTRACT_FIXTURE` in `test_kynver_provider.py`)
+- Changing this file is a breaking contract change: bump `contractVersion` and update both repos.
 
 ---
 
@@ -102,5 +105,5 @@ kynver:
 
 Do not merge from this smoke evidence alone. Both PRs must have CI green + Lorentz review before enabling Kynver-first memory writes (M4) in production.
 
-- Kynver PR: `feat/m3.5-multirepo-adapter-contract` (open against `Totalsolutionsync/Kynver:main`)
-- Hermes PR: Against `Totalsolutionsync/hermes-agent` fork (or `fork/main`) with this smoke evidence
+- Kynver PR #2130: **merged** at `61b65e4681149d6ce335f17737715059493d1c4f` into `Totalsolutionsync/Kynver:main`
+- Hermes PR #7: `feat/m3.5-compat-smoke` → `Totalsolutionsync/hermes-agent:main` (companion; see this smoke evidence)
