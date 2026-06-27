@@ -397,3 +397,118 @@ def test_system_prompt_suppresses_local_memory_after_kynver_recovers():
 
     assert "LOCAL MEMORY" not in parts["volatile"]
     assert "LOCAL USER" not in parts["volatile"]
+
+
+# ---------------------------------------------------------------------------
+# M3.5 — Multi-repo adapter delivery contract / compatibility smoke
+# ---------------------------------------------------------------------------
+#
+# These tests prove the full KynverMemoryProvider pipeline handles the same
+# ContextEnvelope memory shape that the M3 lightweight provider consumes.
+# Fixture shape is pinned at:
+#   Kynver commit: fc5a46f10321e98f158241a49a37ed0611e1647a
+#   Hermes commit: f754cd517
+#   Plugin version: 1.0.0 (plugins/memory/kynver/plugin.yaml)
+# ---------------------------------------------------------------------------
+
+# Inline equivalent of Kynver tests/plugins/memory/fixtures/kynver-context-envelope-contract-v1.json
+_M35_CONTRACT_FIXTURE = {
+    "_meta": {
+        "milestone": "M3.5",
+        "kynverCommit": "fc5a46f10321e98f158241a49a37ed0611e1647a",
+        "hermesCommit": "f754cd517",
+        "hermesPluginVersion": "1.0.0",
+        "kynverMcpAgentOsVersion": "0.3.50",
+    },
+    "contractVersion": "1.0",
+    "envelopeId": "env-m35-compat-fixture-v1",
+    "anchor": {"type": "session", "id": "hermes-compat-test-session", "exists": False},
+    "memories": [
+        {
+            "content": "Hermes Forge is the M3 dogfood adapter for Kynver context envelopes.",
+            "slug": "m3-dogfood-adapter",
+            "sourceId": "kynver:system",
+            "memoryType": "fact",
+        },
+        {
+            "content": "Kynver AgentOS/MARM is the authoritative context substrate for connected agents.",
+            "slug": "substrate-authority",
+            "sourceId": "kynver:system",
+            "memoryType": "fact",
+        },
+    ],
+    "recentSessions": [
+        {"summary": "Implemented M3 read-only Hermes context-envelope provider.", "id": "session-m3-impl"}
+    ],
+    "currentFocus": None,
+    "persona": None,
+    "followUps": [],
+    "generatedAt": "2026-06-27T00:00:00Z",
+}
+
+
+def test_m35_compat_fixture_flows_through_full_provider_format_context():
+    """Contract fixture memories → _coerce_items() → _format_context() → safe block.
+
+    The full KynverMemoryProvider uses _coerce_items() to normalise any
+    server response then _format_context() to render it.  The M3.5 contract
+    fixture must survive both steps and produce a non-empty, safe output.
+    """
+    from plugins.memory.kynver import _coerce_items, _format_context
+
+    items = _coerce_items(_M35_CONTRACT_FIXTURE)
+    result = _format_context(items)
+
+    assert result != "", "formatter must produce output for fixture with memories"
+    assert "## Kynver AgentOS Context" in result
+    assert "dogfood adapter" in result or "authoritative context substrate" in result
+
+
+def test_m35_compat_fixture_format_produces_canonical_header():
+    """Full provider canonical header is '## Kynver AgentOS Context' (two hashes).
+
+    The M3 lightweight provider uses '# Kynver AgentOS context' (one hash).
+    Both are safe from a prompt-injection standpoint.  This test pins the
+    header so a future refactor cannot silently break the label.
+    """
+    from plugins.memory.kynver import _coerce_items, _format_context
+
+    items = _coerce_items(_M35_CONTRACT_FIXTURE)
+    result = _format_context(items)
+
+    assert result.startswith("## Kynver AgentOS Context"), (
+        "canonical header must be '## Kynver AgentOS Context' for the full provider"
+    )
+
+
+def test_m35_compat_fixture_produces_no_credentials_in_context_block():
+    """Contract fixture → formatter must never emit credentials or injection patterns."""
+    from plugins.memory.kynver import _coerce_items, _format_context
+
+    items = _coerce_items(_M35_CONTRACT_FIXTURE)
+    result = _format_context(items)
+
+    assert "Bearer" not in result
+    assert "api_key=" not in result
+    assert "password=" not in result
+    assert "ignore previous instructions" not in result.lower()
+
+
+def test_m35_rollback_observe_only_keeps_local_fallback():
+    """observe_only mode means KynverMemoryProvider is not authoritative.
+
+    When is_authoritative_context() is False, Hermes builds system prompt from
+    local MEMORY.md/USER.md, not from Kynver memory — the pre-M3 baseline.
+    This test proves the rollback path keeps local fallback active.
+    """
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.observe_only = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1")
+
+    assert provider.is_authoritative_context() is False, (
+        "observe_only provider must not claim authoritative context — "
+        "local memory fallback must remain active"
+    )
