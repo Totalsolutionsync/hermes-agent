@@ -777,3 +777,85 @@ def test_on_memory_write_kynver_first_skips_non_scoped_in_cron_context():
     assert not memory_posts, (
         "Non-Kynver content in kynver_first_receipt_only mode must remain in Hermes local memory"
     )
+
+
+# ---------------------------------------------------------------------------
+# M4 live-wiring tests: on_tool_observed("memory", ...) must route through
+# the M4 hub (on_memory_write) rather than calling _write_memory directly.
+# These tests cover the live agent-loop path:
+#   agent_loop_observer → memory_manager.on_tool_observed
+#   → KynverMemoryProvider.on_tool_observed → _mirror_memory_write → on_memory_write
+# ---------------------------------------------------------------------------
+
+
+def test_on_tool_observed_memory_write_routes_through_m4_hub():
+    """Live memory tool write must use M4 routing (idempotency key, scope metadata)."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "mirror"
+    client.config.session_sync_disabled = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-live-1", platform="cli")
+
+    annotation = provider.on_tool_observed(
+        "memory",
+        {"action": "add", "content": "Kynver AgentOS task routing rules.", "target": "memory"},
+        '{"success": true}',
+        {"tool_call_id": "tc-001"},
+    )
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert memory_posts, "Live memory tool write must reach Kynver write path via M4 hub"
+    body = memory_posts[0][2]
+    assert "idempotencyKey" in body.get("metadata", {}), (
+        "M4 hub must embed idempotency key — proves _mirror_memory_write delegates to on_memory_write"
+    )
+    assert body["metadata"].get("kynverScoped") is True
+    assert annotation == {"provider": "kynver", "memory_mirror": "synced"}
+
+
+def test_on_tool_observed_memory_write_non_kynver_stays_local_in_kynver_first_mode():
+    """In kynver_first_receipt_only, non-Kynver content via on_tool_observed must stay local."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "kynver_first_receipt_only"
+    client.config.session_sync_disabled = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-live-2", platform="cli")
+
+    annotation = provider.on_tool_observed(
+        "memory",
+        {"action": "add", "content": "User prefers dark mode in the UI.", "target": "memory"},
+        '{"success": true}',
+        {},
+    )
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert not memory_posts, (
+        "Non-Kynver content in kynver_first_receipt_only mode must not reach Kynver write path"
+    )
+    assert annotation == {"provider": "kynver", "memory_mirror": "local", "durable": False}
+
+
+def test_on_tool_observed_memory_write_off_mode_produces_no_kynver_write():
+    """KYNVER_MEMORY_WRITE_MODE=off via on_tool_observed must not call any Kynver endpoint."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "off"
+    client.config.session_sync_disabled = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-live-3", platform="cli")
+
+    annotation = provider.on_tool_observed(
+        "memory",
+        {"action": "add", "content": "Kynver AgentOS rule.", "target": "memory"},
+        '{"success": true}',
+        {},
+    )
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert not memory_posts, "off mode via on_tool_observed must produce no Kynver memory writes"
+    assert annotation == {"provider": "kynver", "memory_mirror": "off", "durable": False}

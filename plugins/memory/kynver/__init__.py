@@ -650,18 +650,34 @@ class KynverMemoryProvider(MemoryProvider):
         args: Dict[str, Any],
         metadata: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
+        """Route memory tool writes through the M4 on_memory_write routing hub.
+
+        Calling on_memory_write here wires the live agent-loop path
+        (agent_loop_observer → on_tool_observed → here) into the same M4
+        routing code that is directly tested via on_memory_write().  Prior to
+        this fix, _write_memory was called directly — bypassing write-mode
+        gates, idempotency keys, and correction audit events entirely.
+        """
         if self._memory_disabled or self._observe_only:
             return {"provider": "kynver", "memory_mirror": "observed", "durable": False}
-        try:
-            self._write_memory(
-                str(args.get("content") or ""),
-                memory_type="preference" if args.get("target") == "user" else "fact",
-                metadata={**metadata, "action": action, "target": args.get("target") or "memory"},
-                timeout=self._side_effect_timeout,
-            )
-            return {"provider": "kynver", "memory_mirror": "synced"}
-        except Exception as exc:
-            return self._mark_degraded("memory.write", exc)
+        target = str(args.get("target") or "memory")
+        content = str(args.get("content") or "")
+        write_mode = self._memory_write_mode
+        is_kynver_scope = classify_kynver_memory_scope(content, metadata)
+        with self._degraded_lock:
+            degraded_before = self._degraded_reason
+        # Route through the M4 hub: handles mode, scope, idempotency, and correction audit.
+        self.on_memory_write(action, target, content, metadata)
+        # Build annotation from pre-computed routing state (on_memory_write returns None).
+        if write_mode == "off":
+            return {"provider": "kynver", "memory_mirror": "off", "durable": False}
+        if write_mode == "kynver_first_receipt_only" and not is_kynver_scope:
+            return {"provider": "kynver", "memory_mirror": "local", "durable": False}
+        with self._degraded_lock:
+            degraded_now = self._degraded_reason
+        if degraded_now and degraded_now != degraded_before:
+            return {"provider": "kynver", "memory_mirror": "degraded", "durable": False}
+        return {"provider": "kynver", "memory_mirror": "synced"}
 
     def _write_memory(
         self,
