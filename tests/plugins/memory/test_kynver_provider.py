@@ -488,3 +488,292 @@ def test_m35_rollback_observe_only_keeps_local_fallback():
         "observe_only provider must not claim authoritative context — "
         "local memory fallback must remain active"
     )
+
+
+# ---------------------------------------------------------------------------
+# M4 — Kynver-first memory and correction routing
+# ---------------------------------------------------------------------------
+
+
+# -- AC1/AC2: classify_kynver_memory_scope positive cases -------------------
+
+
+def test_classify_kynver_scope_positive_kynver_brand():
+    from plugins.memory.kynver import classify_kynver_memory_scope
+
+    assert classify_kynver_memory_scope("Kynver AgentOS task routing rules.")
+    assert classify_kynver_memory_scope("The agentos memory pipeline is authoritative.")
+    assert classify_kynver_memory_scope("Hermes Forge routes todos via agent-os.")
+    assert classify_kynver_memory_scope("hermes:forge is the source ID for this write.")
+
+
+def test_classify_kynver_scope_positive_marm_and_mq():
+    from plugins.memory.kynver import classify_kynver_memory_scope
+
+    assert classify_kynver_memory_scope("MARM ingestion processes context envelopes.")
+    assert classify_kynver_memory_scope("L1 memory quality score dropped below threshold.")
+    assert classify_kynver_memory_scope("L2 memory aggregate window is 24 hours.")
+    assert classify_kynver_memory_scope("Memory quality feedback loop triggered.")
+
+
+def test_classify_kynver_scope_positive_operating_concepts():
+    from plugins.memory.kynver import classify_kynver_memory_scope
+
+    assert classify_kynver_memory_scope("The Kynver command center shows a stale plan.")
+    assert classify_kynver_memory_scope("Connected-agent operating rules define routing.")
+    assert classify_kynver_memory_scope("Dispatch lane is blocked by a review gate.")
+    assert classify_kynver_memory_scope("Plan progress row updated to partial status.")
+    assert classify_kynver_memory_scope("Kynver PR reconciliation needs a merge pass.")
+
+
+def test_classify_kynver_scope_positive_metadata_source():
+    from plugins.memory.kynver import classify_kynver_memory_scope
+
+    assert classify_kynver_memory_scope("Some content.", {"sourceId": "hermes:forge"})
+    assert classify_kynver_memory_scope("Some content.", {"source": "kynver-marm"})
+    assert classify_kynver_memory_scope("Some content.", {"domain": "agentos"})
+
+
+# -- AC10/false-positive: non-Kynver content must NOT trigger ---------------
+
+
+def test_classify_kynver_scope_false_positive_generic_terms():
+    from plugins.memory.kynver import classify_kynver_memory_scope
+
+    # Generic "harness" / "plan" / "task" / "runtime" must not trigger
+    assert not classify_kynver_memory_scope("I'm fitting a dog harness on my puppy.")
+    assert not classify_kynver_memory_scope("User plans to buy groceries next Tuesday.")
+    assert not classify_kynver_memory_scope("The deployment runtime crashed.")
+    assert not classify_kynver_memory_scope("Factory settings have been restored.")
+
+
+def test_classify_kynver_scope_false_positive_generic_metadata():
+    from plugins.memory.kynver import classify_kynver_memory_scope
+
+    # Unrelated metadata fields must not trigger
+    assert not classify_kynver_memory_scope(
+        "User prefers dark mode.", {"source": "hermes-local", "domain": "ui"}
+    )
+
+
+# -- AC9 (wrong-substrate regression): Kynver correction → Kynver write ----
+
+
+def test_on_memory_write_kynver_scoped_correction_routes_to_kynver():
+    """Kynver correction must call the Kynver write path (AC9 wrong-substrate regression)."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "mirror"
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="cli")
+
+    provider.on_memory_write(
+        "replace",
+        "memory",
+        "Kynver plan progress row for M4 is now complete.",
+        {"correctionEventKey": "evt-001"},
+    )
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert memory_posts, "Kynver write path must be called for Kynver-scoped correction"
+    body = memory_posts[0][2]
+    assert "idempotencyKey" in body.get("metadata", {}), "idempotency key must be in metadata"
+    assert body["metadata"]["action"] == "replace"
+    assert body["metadata"]["kynverScoped"] is True
+
+
+# -- AC10 (non-Kynver preference): Hermes-local stays local in kynver_first mode --
+
+
+def test_on_memory_write_non_kynver_skipped_in_kynver_first_receipt_only_mode():
+    """Non-Kynver content must NOT be sent to Kynver in kynver_first_receipt_only mode (AC10)."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "kynver_first_receipt_only"
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="cli")
+
+    provider.on_memory_write(
+        "add",
+        "memory",
+        "User prefers dark mode in the UI.",
+    )
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert not memory_posts, (
+        "Non-Kynver content must stay in Hermes local memory in kynver_first_receipt_only mode"
+    )
+
+
+# -- AC4: correction emits L1 audit event -----------------------------------
+
+
+def test_on_memory_write_correction_emits_l1_audit_event():
+    """Human correction must emit a session audit event (L1 telemetry anchor) (AC4)."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "mirror"
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="cli")
+    provider._agentos_session_id = "agentos-sess-1"
+
+    provider.on_memory_write(
+        "correct",
+        "memory",
+        "Kynver AgentOS task routing was incorrectly described; correcting now.",
+        {"correctionEventKey": "corr-002"},
+    )
+
+    session_event_posts = [
+        c for c in client.calls
+        if c[0] == "POST" and "/sessions/" in (c[1] or "") and "/events" in (c[1] or "")
+    ]
+    assert session_event_posts, "L1 correction audit event must be posted to session events"
+    event_body = session_event_posts[-1][2]
+    details = event_body.get("event", {}).get("details", {})
+    assert details.get("correctionAction") == "correct"
+    assert details.get("kynverScoped") is True
+    assert "idempotencyKey" in details
+
+
+# -- AC3: add writes go to Kynver with provenance ---------------------------
+
+
+def test_on_memory_write_kynver_scoped_add_includes_provenance():
+    """Kynver-scoped add writes must include source/provenance metadata (AC3)."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "mirror"
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="cli", agent_identity="forge")
+
+    provider.on_memory_write(
+        "add",
+        "memory",
+        "MARM ingestion from context envelope v2 succeeded.",
+    )
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert memory_posts
+    body = memory_posts[0][2]
+    assert body["sourceId"] == "hermes:forge"
+    meta = body.get("metadata", {})
+    assert "runtime" in meta  # from _provenance()
+    assert meta.get("kynverScoped") is True
+    assert meta.get("writeMode") == "mirror"
+
+
+# -- AC6/7: config modes and idempotency keys -------------------------------
+
+
+def test_on_memory_write_off_mode_skips_kynver():
+    """KYNVER_MEMORY_WRITE_MODE=off must disable all Kynver routing (AC6)."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "off"
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1")
+
+    provider.on_memory_write("add", "memory", "Kynver AgentOS operating rule noted.")
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert not memory_posts, "off mode must not route any write to Kynver"
+
+
+def test_on_memory_write_idempotency_key_is_deterministic(monkeypatch):
+    """Same write inputs must produce identical idempotency keys (AC7)."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "mirror"
+    client.config.session_sync_disabled = True  # suppress session open noise
+
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="cli")
+
+    provider.on_memory_write(
+        "add",
+        "memory",
+        "Kynver plan progress is deterministic.",
+        {"envelopeId": "env-42", "actorId": "user-99"},
+    )
+    provider.on_memory_write(
+        "add",
+        "memory",
+        "Kynver plan progress is deterministic.",
+        {"envelopeId": "env-42", "actorId": "user-99"},
+    )
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert len(memory_posts) == 2
+    key1 = memory_posts[0][2]["metadata"]["idempotencyKey"]
+    key2 = memory_posts[1][2]["metadata"]["idempotencyKey"]
+    assert key1 == key2, "Idempotency key must be deterministic for identical inputs"
+
+
+# -- AC11 subcase: secret redaction on degraded path -----------------------
+
+
+def test_on_memory_write_secret_redacted_in_degraded_state():
+    """Secrets must be redacted when a memory write degrades (AC11 redaction)."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    provider = KynverMemoryProvider(client=RaisingClient())
+    provider.initialize("session-1", platform="cli")
+
+    provider.on_memory_write(
+        "add",
+        "memory",
+        "Kynver AgentOS task context.",
+    )
+
+    assert "super-secret-token" not in provider._degraded_reason
+    assert "abc123" not in provider._degraded_reason
+
+
+# -- AC11 subcase: rollback to Hermes when observe_only --------------------
+
+
+def test_on_memory_write_rollback_to_hermes_when_observe_only():
+    """observe_only mode must skip all Kynver memory writes (AC11 rollback)."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.observe_only = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1")
+
+    provider.on_memory_write("add", "memory", "Kynver AgentOS rule noted.")
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert not memory_posts, "observe_only must not produce Kynver memory writes"
+
+
+# -- AC11 subcase: subagent/cron disabled context --------------------------
+
+
+def test_on_memory_write_kynver_first_skips_non_scoped_in_cron_context():
+    """In kynver_first_receipt_only mode, non-Kynver writes stay local even in cron/subagent context."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "kynver_first_receipt_only"
+    provider = KynverMemoryProvider(client=client)
+    # Simulate a subagent/cron context: no agent_identity, minimal session
+    provider.initialize("cron-session-99")
+
+    provider.on_memory_write(
+        "add",
+        "memory",
+        "Nightly summary: user completed 5 tasks.",
+    )
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert not memory_posts, (
+        "Non-Kynver content in kynver_first_receipt_only mode must remain in Hermes local memory"
+    )

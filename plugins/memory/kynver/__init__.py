@@ -43,6 +43,67 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_HERMES_STATUSES = frozenset({"completed", "cancelled"})
 
+# M4: Keywords that indicate content concerns the Kynver/AgentOS operating domain.
+# Only qualified/specific forms are included to avoid false-positives on generic terms
+# like "harness", "plan", "task", or "runtime" used outside the Kynver context.
+_KYNVER_SCOPE_KEYWORDS: frozenset[str] = frozenset({
+    # Explicit Kynver product/brand terms
+    "kynver",
+    "agentos",
+    "agent-os",
+    # Unique Kynver system names (specific enough to be unambiguous)
+    "marm",
+    "hermes forge",
+    "hermes:forge",
+    # Kynver interface concepts
+    "command center",
+    "context envelope",
+    "memory quality",
+    "l1 memory",
+    "l2 memory",
+    # Infrastructure (qualified forms only)
+    "kynver db",
+    "kynver harness",
+    "kynver runtime",
+    "forge runtime",
+    "kynver factory",
+    "kynver plan",
+    "kynver task",
+    "kynver pr",
+    "pr reconciliation",
+    # Agent substrate concepts
+    "operating rules",
+    "connected-agent",
+    "dispatch lane",
+    "plan progress",
+    "lane expert",
+})
+
+_CORRECTION_ACTIONS: frozenset[str] = frozenset({"replace", "correct", "update", "retract"})
+
+
+def classify_kynver_memory_scope(
+    content: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Return True if content concerns the Kynver/AgentOS operating domain.
+
+    Routing rule (M4): Kynver is the primary memory substrate when content
+    concerns Kynver, AgentOS, Command Center, MARM, context envelopes,
+    L1/L2 memory quality, Neon/Kynver DB, factory/runtime/harness,
+    Kynver plans/tasks/PR reconciliation, or connected-agent operating rules.
+    """
+    text = (content or "").lower()
+    for keyword in _KYNVER_SCOPE_KEYWORDS:
+        if keyword in text:
+            return True
+    if metadata:
+        for key in ("source", "sourceId", "domain", "scope", "contextTag"):
+            value = str(metadata.get(key) or "").lower()
+            if "kynver" in value or "agentos" in value or "hermes:forge" in value:
+                return True
+    return False
+
 RUNTIME = "hermes"
 CALL_SIGN = "Forge"
 CONTEXT_TAG = "hermes-forge"
@@ -277,6 +338,10 @@ class KynverMemoryProvider(MemoryProvider):
     @property
     def _side_effect_timeout(self) -> float:
         return float(getattr(self._config, "side_effect_timeout", self._client_timeout) or self._client_timeout)
+
+    @property
+    def _memory_write_mode(self) -> str:
+        return str(getattr(self._config, "memory_write_mode", "mirror") or "mirror")
 
     def _provenance(self) -> dict[str, Any]:
         data = {
@@ -632,6 +697,27 @@ class KynverMemoryProvider(MemoryProvider):
         self._mark_success("memory.write")
         return payload
 
+    def _emit_correction_audit_event(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: Dict[str, Any],
+        idempotency_key: str,
+    ) -> None:
+        """Emit L1 telemetry audit event for memory corrections (M4 AC4)."""
+        self._log_session_event(
+            "memory.correction",
+            metadata={
+                "correctionAction": action,
+                "correctionTarget": target,
+                "contentPreview": (content or "")[:120],
+                "idempotencyKey": idempotency_key,
+                "kynverScoped": classify_kynver_memory_scope(content, metadata),
+                **{k: v for k, v in metadata.items() if k not in ("content",)},
+            },
+        )
+
     def on_memory_write(
         self,
         action: str,
@@ -639,8 +725,85 @@ class KynverMemoryProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if action in {"add", "replace"}:
-            self._mirror_memory_write(action, {"content": content, "target": target}, metadata or {})
+        """Route memory writes to Kynver and/or Hermes local per M4 routing rules.
+
+        Modes (KYNVER_MEMORY_WRITE_MODE):
+          off                   — skip Kynver routing entirely; Hermes handles locally.
+          mirror                — write to Kynver for all add/correction actions regardless of scope.
+          kynver_first_receipt_only — Kynver is primary; Hermes becomes receipt/cache.
+                                  Only Kynver-scoped content is routed; non-scoped stays local.
+
+        Kynver-scoped content (see classify_kynver_memory_scope) always goes to Kynver
+        in mirror and kynver_first_receipt_only modes. Corrections additionally emit
+        an L1 audit event for the memory-quality feedback pipeline.
+        """
+        if self._memory_disabled or self._observe_only:
+            return
+        if not self._active:
+            return
+
+        action_norm = (action or "").strip().lower()
+        if action_norm not in {"add", "replace", "correct", "update", "retract"}:
+            return
+
+        meta = metadata or {}
+        write_mode = self._memory_write_mode
+
+        if write_mode == "off":
+            return
+
+        is_kynver_scope = classify_kynver_memory_scope(content, meta)
+        is_correction = action_norm in _CORRECTION_ACTIONS
+
+        # In kynver_first_receipt_only mode: only route Kynver-scoped content.
+        # Non-scoped content stays in Hermes local memory (no Kynver write).
+        if write_mode == "kynver_first_receipt_only" and not is_kynver_scope:
+            return
+
+        # Build deterministic idempotency key from all write-identity dimensions.
+        envelope_id = str(meta.get("envelopeId") or meta.get("envelope_id") or "")
+        actor_id = str(meta.get("actorId") or meta.get("actor_id") or self._user_id or "")
+        correction_event_key = str(
+            meta.get("correctionEventKey") or meta.get("correction_event_key") or ""
+        )
+        idempotency_key = make_idempotency_key(
+            SOURCE_ID,
+            "memory.write",
+            action_norm,
+            envelope_id or self._agentos_session_id,
+            self._session_id,
+            actor_id,
+            (content or "").strip()[:128],
+            correction_event_key,
+        )
+
+        try:
+            self._write_memory(
+                content,
+                memory_type="preference" if target == "user" else "fact",
+                metadata={
+                    **meta,
+                    "action": action_norm,
+                    "target": target,
+                    "idempotencyKey": idempotency_key,
+                    "kynverScoped": is_kynver_scope,
+                    "writeMode": write_mode,
+                },
+                timeout=self._side_effect_timeout,
+            )
+        except Exception as exc:
+            self._mark_degraded("memory.write.routed", exc)
+            return
+
+        # AC4: corrections emit an additional L1 audit event for the quality pipeline.
+        if is_correction:
+            self._emit_correction_audit_event(
+                action=action_norm,
+                target=target,
+                content=content,
+                metadata=meta,
+                idempotency_key=idempotency_key,
+            )
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         schemas = []

@@ -24,6 +24,7 @@ _DEFAULT_AGENT_OS_SLUG = "ghost"
 _DEFAULT_TIMEOUT_SECONDS = 3.0
 _DEFAULT_SIDE_EFFECT_TIMEOUT_SECONDS = 3.0
 _VALID_MODES = {"enabled", "observe", "disabled"}
+_VALID_MEMORY_WRITE_MODES = frozenset({"off", "mirror", "kynver_first_receipt_only"})
 
 
 class KynverAgentOSError(RuntimeError):
@@ -43,6 +44,9 @@ class KynverAgentOSConfig:
     session_sync_disabled: bool = False
     todo_mirror_disabled: bool = False
     memory_disabled: bool = False
+    # M4: controls how memory writes are routed between Kynver and Hermes local.
+    # off = no Kynver routing; mirror = write to both; kynver_first_receipt_only = Kynver primary.
+    memory_write_mode: str = "mirror"
 
     @property
     def configured(self) -> bool:
@@ -117,6 +121,9 @@ def load_kynver_agentos_config(
         _DEFAULT_SIDE_EFFECT_TIMEOUT_SECONDS,
     )
 
+    raw_mwm = (merged.get("KYNVER_MEMORY_WRITE_MODE") or "mirror").strip().lower()
+    memory_write_mode = raw_mwm if raw_mwm in _VALID_MEMORY_WRITE_MODES else "mirror"
+
     return KynverAgentOSConfig(
         api_url=(merged.get("KYNVER_API_URL") or _DEFAULT_API_URL).strip().rstrip("/"),
         api_key=(merged.get("KYNVER_API_KEY") or "").strip(),
@@ -129,6 +136,7 @@ def load_kynver_agentos_config(
         session_sync_disabled=_env_bool_disabled(merged, "KYNVER_SESSION_SYNC_DISABLED"),
         todo_mirror_disabled=_env_bool_disabled(merged, "KYNVER_TODO_MIRROR_DISABLED"),
         memory_disabled=_env_bool_disabled(merged, "KYNVER_MEMORY_DISABLED"),
+        memory_write_mode=memory_write_mode,
     )
 
 
