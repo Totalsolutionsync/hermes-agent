@@ -629,14 +629,39 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
         elif function_name == "memory":
             target = function_args.get("target", "memory")
-            from tools.memory_tool import memory_tool as _memory_tool
-            function_result = _memory_tool(
-                action=function_args.get("action"),
-                target=target,
-                content=function_args.get("content"),
-                old_text=function_args.get("old_text"),
-                store=agent._memory_store,
-            )
+            function_result = None
+            if agent._memory_manager:
+                metadata = {
+                    "task_id": effective_task_id or "",
+                    "session_id": getattr(agent, "session_id", "") or "",
+                    "parent_session_id": getattr(agent, "_parent_session_id", "") or "",
+                    "platform": getattr(agent, "platform", "") or "",
+                    "tool_name": "memory",
+                    "tool_call_id": getattr(tool_call, "id", "") or "",
+                }
+                try:
+                    if hasattr(agent, "_build_memory_write_metadata"):
+                        metadata.update(
+                            agent._build_memory_write_metadata(
+                                task_id=effective_task_id or "",
+                                tool_call_id=getattr(tool_call, "id", "") or "",
+                            )
+                        )
+                except Exception:
+                    pass
+                function_result = agent._memory_manager.try_handle_memory_tool_first(
+                    function_args,
+                    metadata=metadata,
+                )
+            if function_result is None:
+                from tools.memory_tool import memory_tool as _memory_tool
+                function_result = _memory_tool(
+                    action=str(function_args.get("action") or ""),
+                    target=str(target or "memory"),
+                    content=str(function_args.get("content") or ""),
+                    old_text=str(function_args.get("old_text") or ""),
+                    store=agent._memory_store,
+                )
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")

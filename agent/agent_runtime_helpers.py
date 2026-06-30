@@ -1641,6 +1641,27 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         )
         return append_observer_metadata(result, annotations)
 
+    def _memory_tool_metadata() -> dict:
+        metadata = {
+            "task_id": effective_task_id or "",
+            "session_id": getattr(agent, "session_id", "") or "",
+            "parent_session_id": getattr(agent, "_parent_session_id", "") or "",
+            "platform": getattr(agent, "platform", "") or "",
+            "tool_name": "memory",
+            "tool_call_id": tool_call_id or "",
+        }
+        try:
+            if hasattr(agent, "_build_memory_write_metadata"):
+                metadata.update(
+                    agent._build_memory_write_metadata(
+                        task_id=effective_task_id or "",
+                        tool_call_id=tool_call_id or "",
+                    )
+                )
+        except Exception:
+            pass
+        return metadata
+
     if function_name == "todo":
         from tools.todo_tool import todo_tool as _todo_tool
         result = _todo_tool(
@@ -1670,12 +1691,20 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         return _finalize_agent_loop_result(result)
     elif function_name == "memory":
         target = function_args.get("target", "memory")
+        first_result = None
+        if agent._memory_manager:
+            first_result = agent._memory_manager.try_handle_memory_tool_first(
+                function_args,
+                metadata=_memory_tool_metadata(),
+            )
+        if first_result is not None:
+            return _finalize_agent_loop_result(first_result)
         from tools.memory_tool import memory_tool as _memory_tool
         result = _memory_tool(
-            action=function_args.get("action"),
-            target=target,
-            content=function_args.get("content"),
-            old_text=function_args.get("old_text"),
+            action=str(function_args.get("action") or ""),
+            target=str(target or "memory"),
+            content=str(function_args.get("content") or ""),
+            old_text=str(function_args.get("old_text") or ""),
             store=agent._memory_store,
         )
         return _finalize_agent_loop_result(result)

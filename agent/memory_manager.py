@@ -25,6 +25,7 @@ Usage in run_agent.py:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import inspect
@@ -613,6 +614,42 @@ class MemoryManager:
                     "Memory provider '%s' on_memory_write failed: %s",
                     provider.name, e,
                 )
+
+    def try_handle_memory_tool_first(
+        self,
+        args: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Let an authoritative provider handle the built-in ``memory`` tool first.
+
+        The normal agent-loop path writes Hermes local memory and then notifies
+        providers. That is correct for mirror/read-only modes, but not for a
+        first-class memory backend: scoped writes should hit the authoritative
+        provider before Hermes local receipt/cache state. Providers opt into
+        this by exposing ``handle_memory_tool_first(args, metadata=...)`` and
+        returning a JSON-serializable result. ``None`` means "fall back to the
+        local memory tool" so degradation remains fail-open.
+        """
+        for provider in self._providers:
+            if provider.name == "builtin":
+                continue
+            handler = getattr(provider, "handle_memory_tool_first", None)
+            if not callable(handler):
+                continue
+            try:
+                result = handler(dict(args or {}), metadata=dict(metadata or {}))
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' first-class memory write failed: %s",
+                    provider.name,
+                    e,
+                )
+                continue
+            if isinstance(result, str):
+                return result
+            if isinstance(result, dict):
+                return json.dumps(result, ensure_ascii=False)
+        return None
 
     def on_tool_observed(
         self,
