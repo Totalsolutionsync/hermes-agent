@@ -562,10 +562,72 @@ class KynverMemoryProvider(MemoryProvider):
         if tool_name == "todo" and not self._todo_disabled:
             return self._mirror_todo(args, result, metadata or {})
         if tool_name == "memory":
+            try:
+                payload = json.loads(result) if isinstance(result, str) else result
+            except Exception:
+                payload = None
+            if isinstance(payload, dict) and payload.get("kynverMemoryPrimary"):
+                return None
             action = str(args.get("action") or "")
             if action in {"add", "replace"}:
                 return self._mirror_memory_write(action, args, metadata or {})
         return None
+
+    def handle_memory_tool_first(
+        self,
+        args: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Handle scoped built-in ``memory`` writes before Hermes local storage.
+
+        This is active only in ``kynver_first_receipt_only`` mode. Unscoped
+        writes, unsupported actions, disabled/observe-only states, and Kynver
+        write failures all return ``None`` so the agent falls back to the
+        existing local memory tool path.
+        """
+        if self._memory_disabled or self._observe_only or not self._active:
+            return None
+        if self._memory_write_mode != "kynver_first_receipt_only":
+            return None
+
+        action = str(args.get("action") or "").strip().lower()
+        if action not in {"add", "replace"}:
+            return None
+        target = str(args.get("target") or "memory")
+        if target not in {"memory", "user"}:
+            return None
+        content = str(args.get("content") or "").strip()
+        if not content:
+            return None
+
+        meta = dict(metadata or {})
+        if args.get("old_text"):
+            meta["oldText"] = str(args.get("old_text") or "")
+        meta["firstClassMemoryTool"] = True
+        if not classify_kynver_memory_scope(content, meta):
+            return None
+
+        with self._degraded_lock:
+            degraded_before = self._degraded_reason
+        self.on_memory_write(action, target, content, meta)
+        with self._degraded_lock:
+            degraded_now = self._degraded_reason
+        if degraded_now:
+            return None
+        if degraded_before and degraded_now == degraded_before:
+            return None
+
+        return {
+            "success": True,
+            "message": "Entry written to Kynver memory first; Hermes local memory was left as receipt/cache state.",
+            "target": target,
+            "provider": "kynver",
+            "memory_mirror": "primary",
+            "kynverMemoryPrimary": True,
+            "observer_metadata": [
+                {"provider": "kynver", "memory_mirror": "primary", "durable": True}
+            ],
+        }
 
     def _mirror_todo(
         self,

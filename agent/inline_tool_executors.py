@@ -139,6 +139,14 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
 
 
 def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
+    def _metadata() -> Dict[str, Any]:
+        return agent._build_memory_write_metadata(task_id=ctx.effective_task_id, tool_call_id=ctx.tool_call_id)
+
+    # A first-class provider (Kynver-first mode) may own scoped writes; local memory is the fallback.
+    if agent._memory_manager:
+        first_result = agent._memory_manager.try_handle_memory_tool_first(args, metadata=_metadata())
+        if first_result is not None:
+            return first_result
     result = _call_tool(
         "tools.memory_tool", "memory_tool", args,
         (
@@ -150,14 +158,7 @@ def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
     # Mirror built-in memory writes to external providers; gating lives in
     # MemoryManager.notify_memory_tool_write.
     if agent._memory_manager:
-        agent._memory_manager.notify_memory_tool_write(
-            result,
-            args,
-            build_metadata=lambda: agent._build_memory_write_metadata(
-                task_id=ctx.effective_task_id,
-                tool_call_id=ctx.tool_call_id,
-            ),
-        )
+        agent._memory_manager.notify_memory_tool_write(result, args, build_metadata=_metadata)
     return result
 
 

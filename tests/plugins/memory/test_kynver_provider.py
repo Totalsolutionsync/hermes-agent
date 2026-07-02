@@ -607,6 +607,87 @@ def test_on_memory_write_non_kynver_skipped_in_kynver_first_receipt_only_mode():
     )
 
 
+def test_handle_memory_tool_first_routes_scoped_write_before_local_memory():
+    """Kynver-first mode lets scoped built-in memory calls write to Kynver before local storage."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "kynver_first_receipt_only"
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="cli")
+
+    result = provider.handle_memory_tool_first(
+        {
+            "action": "add",
+            "target": "memory",
+            "content": "Kynver AgentOS memory routing is first-class for scoped writes.",
+        },
+        metadata={"tool_call_id": "call-1"},
+    )
+
+    assert result is not None
+    assert result["success"] is True
+    assert result["kynverMemoryPrimary"] is True
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert len(memory_posts) == 1
+    body = memory_posts[0][2]
+    assert body["content"] == "Kynver AgentOS memory routing is first-class for scoped writes."
+    assert body["metadata"]["firstClassMemoryTool"] is True
+    assert body["metadata"]["writeMode"] == "kynver_first_receipt_only"
+    assert body["metadata"]["kynverScoped"] is True
+
+
+def test_handle_memory_tool_first_falls_back_for_unscoped_content():
+    """Unscoped memory entries remain local receipts in kynver_first_receipt_only mode."""
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "kynver_first_receipt_only"
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="cli")
+
+    result = provider.handle_memory_tool_first(
+        {"action": "add", "target": "user", "content": "User prefers concise replies."},
+        metadata={"tool_call_id": "call-1"},
+    )
+
+    assert result is None
+    assert not [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+
+
+def test_memory_manager_serializes_first_class_memory_result():
+    """Agent dispatch can ask the memory manager for a provider-first memory result."""
+    from agent.memory_manager import MemoryManager
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "kynver_first_receipt_only"
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="cli")
+    manager = MemoryManager()
+    manager.add_provider(provider)
+
+    result = manager.try_handle_memory_tool_first(
+        {
+            "action": "replace",
+            "target": "memory",
+            "old_text": "old Kynver fact",
+            "content": "Kynver AgentOS correction writes are authoritative.",
+        },
+        metadata={"tool_call_id": "call-2"},
+    )
+
+    assert isinstance(result, str)
+    payload = json.loads(result)
+    assert payload["kynverMemoryPrimary"] is True
+    assert payload["observer_metadata"] == [
+        {"provider": "kynver", "memory_mirror": "primary", "durable": True}
+    ]
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert len(memory_posts) == 1
+    assert memory_posts[0][2]["metadata"]["oldText"] == "old Kynver fact"
+
+
 # -- AC4: correction emits L1 audit event -----------------------------------
 
 

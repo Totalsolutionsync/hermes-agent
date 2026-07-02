@@ -850,6 +850,29 @@ class MemoryManager:
             except Exception as e:
                 logger.debug("notify_memory_tool_write failed for op %s: %s", action, e)
 
+    def try_handle_memory_tool_first(self, args: Dict[str, Any],
+                                     metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """Give an authoritative provider first refusal on the built-in ``memory`` tool.
+
+        The normal path writes Hermes local memory, then mirrors to providers. A first-class
+        backend instead wants scoped writes to land in it BEFORE local receipt/cache state.
+        Providers opt in with ``handle_memory_tool_first(args, metadata=...)`` returning a
+        JSON-serializable result; ``None`` (or a raise) falls back to the local tool, fail-open."""
+        for provider in self._providers:
+            handler = getattr(provider, "handle_memory_tool_first", None)
+            if provider.name == "builtin" or not callable(handler):
+                continue
+            try:
+                result = handler(dict(args or {}), metadata=dict(metadata or {}))
+            except Exception as e:
+                logger.debug("Memory provider '%s' first-class memory write failed: %s", provider.name, e)
+                continue
+            if isinstance(result, str):
+                return result
+            if isinstance(result, dict):
+                return json.dumps(result, ensure_ascii=False)
+        return None
+
     def on_tool_observed(self, tool_name: str, args: Dict[str, Any], result: Any,
                          metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Notify external providers after an agent-loop tool completes; returns the dict
