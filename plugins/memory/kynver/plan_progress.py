@@ -108,11 +108,13 @@ def project_todo_write(
     by_key = _row_index(rows)
 
     upserts: list[dict[str, Any]] = []
+    requested_row_keys: set[str] = set()
     for item in todos:
         todo_id = str(item.get("id") or "").strip()
         if not todo_id:
             continue
         row_key = hermes_row_key(todo_id)
+        requested_row_keys.add(row_key)
         status = normalize_hermes_status(str(item.get("status", "")))
         existing = by_key.get(row_key)
         upserts.append(
@@ -124,8 +126,23 @@ def project_todo_write(
             }
         )
 
+    if not merge:
+        for row in rows:
+            row_key = str(row.get("rowKey") or "")
+            if not _parse_todo_id(row_key) or row_key in requested_row_keys:
+                continue
+            upserts.append(
+                {
+                    "rowKey": row_key,
+                    "title": str(row.get("title") or _parse_todo_id(row_key) or row_key)[:500],
+                    "status": "partial",
+                    "taskId": linkage.task_id,
+                }
+            )
+
     if upserts:
-        client.post(f"{plan_path}/progress-rows", {"rows": upserts})
+        for i in range(0, len(upserts), 100):
+            client.post(f"{plan_path}/progress-rows", {"rows": upserts[i : i + 100]})
 
     focus = next(
         (t for t in todos if normalize_hermes_status(str(t.get("status", ""))) == "in_progress"),

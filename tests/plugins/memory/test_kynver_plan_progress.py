@@ -50,6 +50,58 @@ def test_project_todo_write_sets_focus_not_running():
     assert "running" not in str(focus_calls)
 
 
+def test_replace_todo_write_supersedes_omitted_hermes_rows():
+    client = MagicMock()
+    client.get.return_value = {
+        "items": [
+            {"rowKey": "hermes-todo:old", "title": "Old preserved task", "status": "todo"},
+            {"rowKey": "external:keep", "title": "Non-Hermes row", "status": "todo"},
+        ]
+    }
+    linkage = OperatingLinkage(
+        plan_id="plan-1",
+        task_id="task-1",
+        session_id="sess-1",
+        executor_ref="hermes:forge",
+    )
+
+    result = project_todo_write(
+        client,
+        linkage,
+        [{"id": "current", "content": "Current canonical task", "status": "pending"}],
+        merge=False,
+    )
+
+    assert result["projected"] is True
+    rows_call = [c for c in client.post.call_args_list if c.args[0] == "/plans/plan-1/progress-rows"][0]
+    rows = rows_call.args[1]["rows"]
+    by_key = {row["rowKey"]: row for row in rows}
+    assert by_key["hermes-todo:current"]["status"] == "todo"
+    assert by_key["hermes-todo:old"]["status"] == "partial"
+    assert "external:keep" not in by_key
+
+
+def test_replace_todo_write_batches_large_supersede_payloads():
+    client = MagicMock()
+    client.get.return_value = {
+        "items": [
+            {"rowKey": f"hermes-todo:old-{i}", "title": f"Old {i}", "status": "todo"}
+            for i in range(105)
+        ]
+    }
+    linkage = OperatingLinkage(plan_id="plan-1", task_id="task-1", session_id="sess-1", executor_ref="hermes:forge")
+
+    project_todo_write(
+        client,
+        linkage,
+        [{"id": "current", "content": "Current canonical task", "status": "pending"}],
+        merge=False,
+    )
+
+    progress_calls = [c for c in client.post.call_args_list if c.args[0] == "/plans/plan-1/progress-rows"]
+    assert [len(c.args[1]["rows"]) for c in progress_calls] == [100, 6]
+
+
 def test_running_row_without_focus_maps_to_pending():
     client = MagicMock()
     client.get.side_effect = [
