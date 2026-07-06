@@ -341,7 +341,7 @@ class KynverMemoryProvider(MemoryProvider):
 
     @property
     def _memory_write_mode(self) -> str:
-        return str(getattr(self._config, "memory_write_mode", "mirror") or "mirror")
+        return str(getattr(self._config, "memory_write_mode", "kynver_first_receipt_only") or "kynver_first_receipt_only")
 
     def _provenance(self) -> dict[str, Any]:
         data = {

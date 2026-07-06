@@ -612,7 +612,8 @@ def test_handle_memory_tool_first_routes_scoped_write_before_local_memory():
     from plugins.memory.kynver import KynverMemoryProvider
 
     client = FakeClient()
-    client.config.memory_write_mode = "kynver_first_receipt_only"
+    # Deliberately do not set client.config.memory_write_mode. The provider default
+    # must be Kynver-first so Hermes-local memory is only a fallback/cache path.
     provider = KynverMemoryProvider(client=client)
     provider.initialize("session-1", platform="cli")
 
