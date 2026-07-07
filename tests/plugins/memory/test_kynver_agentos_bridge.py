@@ -45,6 +45,28 @@ def test_load_config_merges_profile_and_process_env(monkeypatch, tmp_path: Path)
     assert cfg.timeout == 2.5
 
 
+def test_memory_write_mode_defaults_to_kynver_first(monkeypatch, tmp_path: Path):
+    """Kynver-configured Hermes should use Kynver/MARM as primary unless explicitly opted out."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("KYNVER_API_KEY=profile-key\nKYNVER_AGENT_OS_SLUG=forge\n", encoding="utf-8")
+    monkeypatch.setattr("plugins.memory.kynver.agentos_bridge._active_env_path", lambda: env_path)
+
+    cfg = load_kynver_agentos_config({})
+
+    assert cfg.memory_write_mode == "kynver_first_receipt_only"
+
+
+def test_memory_write_mode_explicit_mirror_is_honored(monkeypatch, tmp_path: Path):
+    """Mirror remains available only as an explicit compatibility override."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("KYNVER_API_KEY=profile-key\nKYNVER_AGENT_OS_SLUG=forge\n", encoding="utf-8")
+    monkeypatch.setattr("plugins.memory.kynver.agentos_bridge._active_env_path", lambda: env_path)
+
+    cfg = load_kynver_agentos_config({"KYNVER_MEMORY_WRITE_MODE": "mirror"})
+
+    assert cfg.memory_write_mode == "mirror"
+
+
 def test_agentos_available_requires_credentials():
     assert not agentos_available({})
     assert agentos_available(

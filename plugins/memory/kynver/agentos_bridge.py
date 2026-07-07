@@ -24,7 +24,8 @@ _DEFAULT_AGENT_OS_SLUG = "ghost"
 _DEFAULT_TIMEOUT_SECONDS = 3.0
 _DEFAULT_SIDE_EFFECT_TIMEOUT_SECONDS = 3.0
 _VALID_MODES = {"enabled", "observe", "disabled"}
-_VALID_MEMORY_WRITE_MODES = frozenset({"off", "mirror", "kynver_first_receipt_only"})
+_DEFAULT_MEMORY_WRITE_MODE = "kynver_first_receipt_only"
+_VALID_MEMORY_WRITE_MODES = frozenset({"off", "mirror", _DEFAULT_MEMORY_WRITE_MODE})
 
 
 class KynverAgentOSError(RuntimeError):
@@ -46,7 +47,7 @@ class KynverAgentOSConfig:
     memory_disabled: bool = False
     # M4: controls how memory writes are routed between Kynver and Hermes local.
     # off = no Kynver routing; mirror = write to both; kynver_first_receipt_only = Kynver primary.
-    memory_write_mode: str = "mirror"
+    memory_write_mode: str = _DEFAULT_MEMORY_WRITE_MODE
 
     @property
     def configured(self) -> bool:
@@ -121,8 +122,8 @@ def load_kynver_agentos_config(
         _DEFAULT_SIDE_EFFECT_TIMEOUT_SECONDS,
     )
 
-    raw_mwm = (merged.get("KYNVER_MEMORY_WRITE_MODE") or "mirror").strip().lower()
-    memory_write_mode = raw_mwm if raw_mwm in _VALID_MEMORY_WRITE_MODES else "mirror"
+    raw_mwm = (merged.get("KYNVER_MEMORY_WRITE_MODE") or _DEFAULT_MEMORY_WRITE_MODE).strip().lower()
+    memory_write_mode = raw_mwm if raw_mwm in _VALID_MEMORY_WRITE_MODES else _DEFAULT_MEMORY_WRITE_MODE
 
     return KynverAgentOSConfig(
         api_url=(merged.get("KYNVER_API_URL") or _DEFAULT_API_URL).strip().rstrip("/"),
