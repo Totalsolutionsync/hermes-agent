@@ -40,6 +40,19 @@ from agent.model_metadata import estimate_request_tokens_rough
 
 logger = logging.getLogger(__name__)
 
+# Operational compaction summaries prioritize active-state handoff fields over
+# chronological transcripts. See ContextCompressor._generate_summary template.
+OPERATIONAL_COMPACTION_SECTIONS = (
+    "Current User Ask",
+    "Active Task",
+    "Active Task/Plan IDs",
+    "Latest Verified State",
+    "Open Blockers",
+    "Decisions & Constraints",
+    "Artifact Handles",
+    "Omitted History Refs",
+)
+
 
 def _compression_lock_holder(agent: Any) -> str:
     """Build a unique holder id for the lock: pid:tid:agent-instance:uuid.

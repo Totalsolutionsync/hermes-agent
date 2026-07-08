@@ -1014,22 +1014,41 @@ class ProcessRegistry:
         with session._lock:
             full_output = strip_ansi(session.output_buffer)
 
-        lines = full_output.splitlines()
-        total_lines = len(lines)
+        from tools.tool_output_artifacts import compact_tool_output
+        from tools.tool_output_limits import get_max_bytes
 
-        # Default: last N lines
-        if offset == 0 and limit > 0:
-            selected = lines[-limit:]
+        compacted = compact_tool_output(
+            full_output,
+            threshold=get_max_bytes(),
+            kind="process",
+            command=session.command,
+            exit_code=session.exit_code if session.exited else None,
+        )
+        if compacted != full_output:
+            result = {
+                "session_id": session.id,
+                "status": "exited" if session.exited else "running",
+                "output": compacted,
+                "total_lines": full_output.count("\n") + (1 if full_output else 0),
+                "showing": "artifact preview",
+            }
         else:
-            selected = lines[offset:offset + limit]
+            lines = full_output.splitlines()
+            total_lines = len(lines)
 
-        result = {
-            "session_id": session.id,
-            "status": "exited" if session.exited else "running",
-            "output": "\n".join(selected),
-            "total_lines": total_lines,
-            "showing": f"{len(selected)} lines",
-        }
+            # Default: last N lines
+            if offset == 0 and limit > 0:
+                selected = lines[-limit:]
+            else:
+                selected = lines[offset:offset + limit]
+
+            result = {
+                "session_id": session.id,
+                "status": "exited" if session.exited else "running",
+                "output": "\n".join(selected),
+                "total_lines": total_lines,
+                "showing": f"{len(selected)} lines",
+            }
         if session.exited:
             self._completion_consumed.add(session_id)
         return result
@@ -1080,10 +1099,20 @@ class ProcessRegistry:
             self._reconcile_local_exit(session)
             if session.exited:
                 self._completion_consumed.add(session_id)
+                from tools.tool_output_artifacts import compact_tool_output
+                from tools.tool_output_limits import get_max_bytes
+
+                full_output = strip_ansi(session.output_buffer)
                 result = {
                     "status": "exited",
                     "exit_code": session.exit_code,
-                    "output": strip_ansi(session.output_buffer[-2000:]),
+                    "output": compact_tool_output(
+                        full_output,
+                        threshold=get_max_bytes(),
+                        kind="process",
+                        command=session.command,
+                        exit_code=session.exit_code,
+                    ),
                 }
                 if timeout_note:
                     result["timeout_note"] = timeout_note

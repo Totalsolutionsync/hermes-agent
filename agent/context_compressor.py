@@ -1189,62 +1189,52 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         )
 
         # Shared structured template (used by both paths).
-        _template_sections = f"""## Active Task
-[THE SINGLE MOST IMPORTANT FIELD. Copy the user's most recent request or
-task assignment verbatim — the exact words they used. If multiple tasks
-were requested and only some are done, list only the ones NOT yet completed.
-Continuation should pick up exactly here. Example:
-"User asked: 'Now refactor the auth module to use JWT instead of sessions'"
-If no outstanding task exists, write "None."]
+        _template_sections = f"""## Current User Ask
+[Copy the user's most recent unfulfilled request verbatim. This is the primary continuity anchor.]
+
+## Active Task
+[Same as Current User Ask when a single thread; otherwise list only NOT-yet-completed tasks. If none, write "None."]
+
+## Active Task/Plan IDs
+[Exact task IDs, plan IDs, branch names, PR URLs, or session keys needed to resume ops work. If none, write "None."]
 
 ## Goal
-[What the user is trying to accomplish overall]
+[What the user is trying to accomplish overall — operational objective, not a chronology.]
 
-## Constraints & Preferences
-[User preferences, coding style, constraints, important decisions]
+## Latest Verified State
+[Current verified facts only: branch, dirty files, test status, running processes, deploy/runtime state. Prefer live-verified facts over stale memory.]
+
+## Open Blockers
+[Unresolved blockers/errors with exact messages. If none, write "None."]
+
+## Decisions & Constraints
+[Important decisions, preferences, and constraints that govern next actions.]
 
 ## Completed Actions
-[Numbered list of concrete actions taken — include tool used, target, and outcome.
-Format each as: N. ACTION target — outcome [tool: name]
-Example:
-1. READ config.py:45 — found `==` should be `!=` [tool: read_file]
-2. PATCH config.py:45 — changed `==` to `!=` [tool: patch]
-3. TEST `pytest tests/` — 3/50 failed: test_parse, test_validate, test_edge [tool: terminal]
-Be specific with file paths, commands, line numbers, and results.]
+[Numbered list of concrete actions — tool, target, outcome. Avoid narrative event logs.]
 
-## Active State
-[Current working state — include:
-- Working directory and branch (if applicable)
-- Modified/created files with brief note on each
-- Test status (X/Y passing)
-- Any running processes or servers
-- Environment details that matter]
+## Artifact Handles
+[Resolvable handles or profile paths for spilled logs/artifacts the model may need later. If none, write "None."]
 
-## In Progress
-[Work currently underway — what was being done when compaction fired]
-
-## Blocked
-[Any blockers, errors, or issues not yet resolved. Include exact error messages.]
-
-## Key Decisions
-[Important technical decisions and WHY they were made]
+## Omitted History Refs
+[Count or brief note of what was compacted away; do NOT replay chronological event logs unless explicitly requested.]
 
 ## Resolved Questions
-[Questions the user asked that were ALREADY answered — include the answer so it is not repeated]
+[Already-answered user questions with answers so they are not repeated.]
 
 ## Pending User Asks
-[Questions or requests from the user that have NOT yet been answered or fulfilled. If none, write "None."]
+[Unanswered user requests. If none, write "None."]
 
 ## Relevant Files
-[Files read, modified, or created — with brief note on each]
+[Files read, modified, or created — with brief note on each.]
 
 ## Remaining Work
-[What remains to be done — framed as context, not instructions]
+[What remains — framed as context, not active instructions.]
 
 ## Critical Context
-[Any specific values, error messages, configuration details, or data that would be lost without explicit preservation. NEVER include API keys, tokens, passwords, or credentials — write [REDACTED] instead.]
+[Specific values/error messages that would be lost. NEVER include secrets — write [REDACTED].]
 
-Target ~{summary_budget} tokens. Be CONCRETE — include file paths, command outputs, error messages, line numbers, and specific values. Avoid vague descriptions like "made some changes" — say exactly what changed.
+Target ~{summary_budget} tokens. Prefer operational state over chronological transcripts. Be CONCRETE with paths, commands, exit codes, and IDs.
 
 Write only the summary body. Do not include any preamble or prefix."""
 
@@ -1260,7 +1250,7 @@ PREVIOUS SUMMARY:
 NEW TURNS TO INCORPORATE:
 {content_to_summarize}
 
-Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new completed actions to the numbered list (continue numbering). Move items from "In Progress" to "Completed Actions" when done. Move answered questions to "Resolved Questions". Update "Active State" to reflect current state. Remove information only if it is clearly obsolete. CRITICAL: Update "## Active Task" to reflect the user's most recent unfulfilled request — this is the most important field for task continuity.
+Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new completed actions to the numbered list (continue numbering). Move answered questions to "Resolved Questions". Update "Latest Verified State" to reflect current state. Remove information only if it is clearly obsolete. CRITICAL: Update "## Current User Ask" and "## Active Task" to reflect the user's most recent unfulfilled request — these are the most important fields for task continuity. Do not expand into chronological event logs.
 
 {_template_sections}"""
         else:

@@ -1333,6 +1333,13 @@ class SendResult:
     # made up the full payload, in send order.  Empty tuple for the common
     # single-message case.
     continuation_message_ids: tuple = ()
+    # When overflow split-and-deliver stops before all chunks land (e.g. flood
+    # control on a continuation send), ``overflow_partial`` is True and
+    # ``delivered_content_prefix`` is the slice of the original payload the
+    # user already saw — so the stream consumer can resume from the next
+    # chunk instead of re-sending chunk 1.
+    overflow_partial: bool = False
+    delivered_content_prefix: Optional[str] = None
 
 
 class EphemeralReply(str):

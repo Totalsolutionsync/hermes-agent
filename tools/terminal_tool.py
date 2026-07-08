@@ -2267,18 +2267,17 @@ def terminal_tool(
             except Exception:
                 pass
             
-            # Truncate output if too long, keeping both head and tail
+            # Spill oversized output to profile-safe artifacts with first/last-line preview.
+            from tools.tool_output_artifacts import compact_tool_output
             from tools.tool_output_limits import get_max_bytes
-            MAX_OUTPUT_CHARS = get_max_bytes()
-            if len(output) > MAX_OUTPUT_CHARS:
-                head_chars = int(MAX_OUTPUT_CHARS * 0.4)  # 40% head (error messages often appear early)
-                tail_chars = MAX_OUTPUT_CHARS - head_chars  # 60% tail (most recent/relevant output)
-                omitted = len(output) - head_chars - tail_chars
-                truncated_notice = (
-                    f"\n\n... [OUTPUT TRUNCATED - {omitted} chars omitted "
-                    f"out of {len(output)} total] ...\n\n"
-                )
-                output = output[:head_chars] + truncated_notice + output[-tail_chars:]
+
+            output = compact_tool_output(
+                output,
+                threshold=get_max_bytes(),
+                kind="terminal",
+                command=command,
+                exit_code=returncode,
+            )
 
             # Strip ANSI escape sequences so the model never sees terminal
             # formatting — prevents it from copying escapes into file writes.

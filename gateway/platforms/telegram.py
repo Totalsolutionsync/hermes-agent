@@ -2241,6 +2241,103 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return SendResult(success=False, error=str(e))
 
+    _OVERFLOW_CHUNK_INDICATOR_RE = re.compile(r" \(\d+/\d+\)$")
+
+    @classmethod
+    def _overflow_delivered_content_prefix(
+        cls, content: str, chunks: list[str], delivered_count: int,
+    ) -> str:
+        """Return the slice of ``content`` already shown after partial overflow."""
+        if delivered_count <= 0:
+            return ""
+        prefix = "".join(
+            cls._OVERFLOW_CHUNK_INDICATOR_RE.sub("", chunk)
+            for chunk in chunks[:delivered_count]
+        )
+        if content.startswith(prefix):
+            return prefix
+        return prefix
+
+    async def _send_overflow_continuation(
+        self,
+        chat_id: str,
+        chunk: str,
+        *,
+        prev_id: str,
+        thread_id: Optional[str],
+        metadata: Optional[Dict[str, Any]],
+        finalize: bool,
+    ) -> Optional[str]:
+        """Send one overflow continuation chunk with flood-control retries."""
+        reply_to_id = int(prev_id) if prev_id else None
+        for attempt in range(3):
+            thread_kwargs = self._thread_kwargs_for_send(
+                chat_id,
+                thread_id,
+                metadata,
+                reply_to_message_id=reply_to_id,
+            )
+            for use_markdown in ((True, False) if finalize else (False,)):
+                try:
+                    text = self.format_message(chunk) if use_markdown else chunk
+                    sent_msg = await self._bot.send_message(
+                        chat_id=int(chat_id),
+                        text=text,
+                        parse_mode=ParseMode.MARKDOWN_V2 if use_markdown else None,
+                        reply_to_message_id=reply_to_id,
+                        **thread_kwargs,
+                        **self._link_preview_kwargs(),
+                        **self._notification_kwargs(metadata),
+                    )
+                    return str(getattr(sent_msg, "message_id", "")) or prev_id
+                except Exception as send_err:
+                    err_lower = str(send_err).lower()
+                    if "reply message not found" in err_lower:
+                        retry_thread_kwargs = (
+                            {}
+                            if metadata and metadata.get("telegram_dm_topic_reply_fallback")
+                            else self._thread_kwargs_for_send(
+                                chat_id, thread_id, metadata, reply_to_message_id=None,
+                            )
+                        )
+                        try:
+                            sent_msg = await self._bot.send_message(
+                                chat_id=int(chat_id),
+                                text=chunk,
+                                **retry_thread_kwargs,
+                                **self._link_preview_kwargs(),
+                                **self._notification_kwargs(metadata),
+                            )
+                            return str(getattr(sent_msg, "message_id", "")) or prev_id
+                        except Exception as retry_err:
+                            logger.warning(
+                                "[%s] Overflow continuation no-reply retry failed: %s",
+                                self.name, retry_err,
+                            )
+                            return None
+                    if use_markdown:
+                        continue
+                    retry_after = getattr(send_err, "retry_after", None)
+                    if retry_after is not None or "retry after" in err_lower:
+                        if attempt < 2:
+                            wait = float(retry_after) if retry_after is not None else 1.0
+                            logger.warning(
+                                "[%s] Telegram flood control on overflow continuation "
+                                "(attempt %d/3), retrying in %.1fs: %s",
+                                self.name,
+                                attempt + 1,
+                                wait,
+                                send_err,
+                            )
+                            await asyncio.sleep(wait)
+                            break
+                    logger.warning(
+                        "[%s] Overflow continuation send failed: %s",
+                        self.name, send_err,
+                    )
+                    return None
+        return None
+
     async def _edit_overflow_split(
         self,
         chat_id: str,
@@ -2314,86 +2411,39 @@ class TelegramAdapter(BasePlatformAdapter):
 
         # Step 2 — send each remaining chunk as a continuation message,
         # threaded as a reply to the previous so the user sees them as a
-        # contiguous block.  We call self._bot.send_message directly so the
-        # continuation skips ``self.send``'s own pre-chunking pass (chunks
-        # are already correctly sized).  Best-effort MarkdownV2 with plain
-        # fallback, mirroring send().
+        # contiguous block.  Continuations are already correctly sized; use
+        # ``_send_overflow_continuation`` so flood-control waits retry the
+        # current chunk instead of re-editing chunk 1.
         continuation_ids: list[str] = []
         prev_id = message_id
         thread_id = self._metadata_thread_id(metadata)
+        delivered_count = 1  # first chunk edited onto ``message_id``
         for chunk in chunks[1:]:
-            sent_msg = None
-            reply_to_id = int(prev_id) if prev_id else None
-            thread_kwargs = self._thread_kwargs_for_send(
+            new_id = await self._send_overflow_continuation(
                 chat_id,
-                thread_id,
-                metadata,
-                reply_to_message_id=reply_to_id,
+                chunk,
+                prev_id=prev_id,
+                thread_id=thread_id,
+                metadata=metadata,
+                finalize=finalize,
             )
-            for use_markdown in (True, False) if finalize else (False,):
-                try:
-                    text = self.format_message(chunk) if use_markdown else chunk
-                    sent_msg = await self._bot.send_message(
-                        chat_id=int(chat_id),
-                        text=text,
-                        parse_mode=ParseMode.MARKDOWN_V2 if use_markdown else None,
-                        reply_to_message_id=reply_to_id,
-                        **thread_kwargs,
-                        **self._link_preview_kwargs(),
-                        **self._notification_kwargs(metadata),
-                    )
-                    break
-                except Exception as send_err:
-                    if "reply message not found" in str(send_err).lower():
-                        # Drop the reply anchor and try again.  Private DM
-                        # topic fallback needs the anchor and topic id together;
-                        # forum topics can still safely keep message_thread_id.
-                        retry_thread_kwargs = (
-                            {}
-                            if metadata and metadata.get("telegram_dm_topic_reply_fallback")
-                            else self._thread_kwargs_for_send(
-                                chat_id, thread_id, metadata, reply_to_message_id=None
-                            )
-                        )
-                        try:
-                            sent_msg = await self._bot.send_message(
-                                chat_id=int(chat_id),
-                                text=chunk,
-                                **retry_thread_kwargs,
-                                **self._link_preview_kwargs(),
-                                **self._notification_kwargs(metadata),
-                            )
-                            break
-                        except Exception as _retry_err:
-                            logger.warning(
-                                "[%s] Overflow continuation no-reply retry failed: %s",
-                                self.name, _retry_err,
-                            )
-                            sent_msg = None
-                            break
-                    if use_markdown:
-                        # try plain text on next loop iteration
-                        continue
-                    logger.warning(
-                        "[%s] Overflow continuation send failed: %s",
-                        self.name, send_err,
-                    )
-                    sent_msg = None
-                    break
-            if sent_msg is None:
-                # Continuation failed — the user has chunk 1 + however many
-                # continuations succeeded.  Report success with what we got
-                # so the stream consumer knows the edit landed; the
-                # remaining tail is lost on this attempt and the next
-                # streaming tick may retry.
+            if new_id is None:
                 logger.warning(
                     "[%s] Overflow split: stopped at %d/%d chunks delivered",
-                    self.name, 1 + len(continuation_ids), len(chunks),
+                    self.name, delivered_count, len(chunks),
                 )
-                break
-            new_id = str(getattr(sent_msg, "message_id", "")) or prev_id
+                return SendResult(
+                    success=True,
+                    message_id=prev_id,
+                    continuation_message_ids=tuple(continuation_ids),
+                    overflow_partial=True,
+                    delivered_content_prefix=self._overflow_delivered_content_prefix(
+                        content, chunks, delivered_count,
+                    ),
+                )
             continuation_ids.append(new_id)
             prev_id = new_id
+            delivered_count += 1
 
         last_id = continuation_ids[-1] if continuation_ids else message_id
         logger.debug(

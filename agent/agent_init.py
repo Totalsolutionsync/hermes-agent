@@ -1245,7 +1245,13 @@ def init_agent(
     _compression_cfg = _agent_cfg.get("compression", {})
     if not isinstance(_compression_cfg, dict):
         _compression_cfg = {}
-    compression_threshold = float(_compression_cfg.get("threshold", 0.50))
+    from agent.compression_settings import resolve_compression_settings
+
+    _resolved_compression = resolve_compression_settings(
+        _compression_cfg,
+        platform=(platform or "").strip().lower() or None,
+    )
+    compression_threshold = float(_resolved_compression.get("threshold", 0.50))
     try:
         from agent.auxiliary_client import _compression_threshold_for_model as _cthresh_fn
         _model_cthresh = _cthresh_fn(agent.model)
@@ -1253,9 +1259,9 @@ def init_agent(
             compression_threshold = _model_cthresh
     except Exception:
         pass
-    compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
-    compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
-    compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
+    compression_enabled = str(_resolved_compression.get("enabled", True)).lower() in {"true", "1", "yes"}
+    compression_target_ratio = float(_resolved_compression.get("target_ratio", 0.20))
+    compression_protect_last = int(_resolved_compression.get("protect_last_n", 20))
     # protect_first_n is the number of non-system messages to protect at
     # the head, in addition to the system prompt (which is always
     # implicitly protected by the compressor).  Floor at 0 — a value of
@@ -1263,10 +1269,10 @@ def init_agent(
     # is a legitimate (and common) configuration for long-running
     # rolling-compaction sessions.
     compression_protect_first = max(
-        0, int(_compression_cfg.get("protect_first_n", 3))
+        0, int(_resolved_compression.get("protect_first_n", 3))
     )
     compression_abort_on_summary_failure = str(
-        _compression_cfg.get("abort_on_summary_failure", False)
+        _resolved_compression.get("abort_on_summary_failure", False)
     ).lower() in {"true", "1", "yes"}
 
     # Read optional explicit context_length override for the auxiliary

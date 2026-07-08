@@ -110,7 +110,7 @@ def test_terminal_output_transform_still_truncates_long_replacement(monkeypatch,
 
     assert "PLUGIN-HEAD" in result["output"]
     assert "PLUGIN-TAIL" in result["output"]
-    assert "[OUTPUT TRUNCATED" in result["output"]
+    assert "[TOOL OUTPUT ARTIFACT" in result["output"]
     assert transformed_output != result["output"]
 
 
@@ -206,4 +206,4 @@ def test_terminal_output_transform_integration_with_real_plugin(monkeypatch, tmp
 
     assert "PLUGIN-HEAD" in result["output"]
     assert "PLUGIN-TAIL" in result["output"]
-    assert "[OUTPUT TRUNCATED" in result["output"]
+    assert "[TOOL OUTPUT ARTIFACT" in result["output"]
