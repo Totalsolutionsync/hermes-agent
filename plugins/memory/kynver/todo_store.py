@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 from tools.todo_tool import TodoStore
 
@@ -29,11 +30,17 @@ class KynverTodoStore:
         linkage: Optional[OperatingLinkage] = None,
         allow_fallback: bool = True,
         degraded: bool = False,
+        retry_interval_seconds: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._client = client
         self._linkage = linkage or load_operating_linkage()
         self._allow_fallback = allow_fallback
         self._degraded = degraded
+        self._retry_interval_seconds = max(0.0, retry_interval_seconds)
+        self._clock = clock
+        self._degraded_at = self._clock() if degraded else None
+        self._pending_writes: List[tuple[List[Dict[str, Any]], bool]] = []
         self._local = TodoStore()
 
     @property
@@ -42,10 +49,68 @@ class KynverTodoStore:
 
     def _mark_degraded(self, reason: str) -> None:
         self._degraded = True
+        self._degraded_at = self._clock()
         logger.warning("Kynver todo store degraded to local fallback: %s", reason)
 
+    def _recovery_due(self) -> bool:
+        if not self._degraded:
+            return False
+        if self._degraded_at is None:
+            return True
+        return self._clock() - self._degraded_at >= self._retry_interval_seconds
+
+    def _try_recover(self) -> Optional[List[Dict[str, str]]]:
+        """Retry a read after the cooldown and clear transient degradation."""
+
+        if not self._recovery_due() or not self._linkage.plan_id:
+            return None
+        try:
+            while self._pending_writes:
+                pending_todos, pending_merge = self._pending_writes[0]
+                try:
+                    blocked = inspect_todo_write(
+                        self._client,
+                        self._linkage,
+                        pending_todos,
+                        merge=pending_merge,
+                    )
+                    if blocked:
+                        raise PreTransitionError(blocked)
+                    project_todo_write(
+                        self._client,
+                        self._linkage,
+                        pending_todos,
+                        merge=pending_merge,
+                    )
+                except PreTransitionError as exc:
+                    self._pending_writes.pop(0)
+                    logger.warning(
+                        "Kynver todo recovery skipped a write blocked by transition policy: %s",
+                        exc,
+                    )
+                    continue
+                self._pending_writes.pop(0)
+            local_items = self._local.read()
+            items = reconcile_todos_from_kynver(
+                self._client,
+                self._linkage,
+                local_items,
+            )
+        except Exception as exc:
+            self._mark_degraded(str(exc))
+            return None
+        self._degraded = False
+        self._degraded_at = None
+        logger.info("Kynver todo store recovered; AgentOS plan progress is available")
+        return items
+
     def read(self) -> List[Dict[str, str]]:
-        if self._degraded or not self._linkage.plan_id:
+        if self._degraded:
+            recovered = self._try_recover()
+            if recovered is not None:
+                return recovered
+            return self._local.read()
+        if not self._linkage.plan_id:
             return self._local.read()
         try:
             return reconcile_todos_from_kynver(
@@ -66,8 +131,16 @@ class KynverTodoStore:
 
     def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
         local_items = self._local.write(todos, merge=merge)
+        write_batch = ([dict(item) for item in todos], merge)
 
-        if self._degraded or not self._linkage.plan_id:
+        if self._degraded:
+            self._pending_writes.append(write_batch)
+            recovered = self._try_recover()
+            if self._degraded:
+                return local_items
+            if recovered is not None:
+                return recovered
+        if not self._linkage.plan_id:
             return local_items
 
         try:
@@ -92,11 +165,13 @@ class KynverTodoStore:
         except KynverAgentOSError as exc:
             if not self._allow_fallback:
                 raise
+            self._pending_writes.append(write_batch)
             self._mark_degraded(str(exc))
             return self._local.read()
         except Exception as exc:
             if not self._allow_fallback:
                 raise KynverAgentOSError(str(exc)) from exc
+            self._pending_writes.append(write_batch)
             self._mark_degraded(str(exc))
             return self._local.read()
 

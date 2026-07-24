@@ -98,6 +98,228 @@ def test_degraded_fallback_on_agentos_failure():
     assert written[0]["content"] == "local"
 
 
+def test_degraded_store_recovers_after_retry_interval():
+    client = PlanProgressFakeClient()
+    original_get = client.get
+    failing = True
+
+    def flaky_get(path, **kwargs):
+        if failing:
+            raise RuntimeError("network down")
+        return original_get(path, **kwargs)
+
+    client.get = flaky_get
+    now = [100.0]
+    linkage = OperatingLinkage(
+        plan_id="plan-1",
+        task_id=None,
+        session_id=None,
+        executor_ref="hermes:forge",
+    )
+    store = KynverTodoStore(
+        client,
+        linkage=linkage,
+        allow_fallback=True,
+        retry_interval_seconds=30,
+        clock=lambda: now[0],
+    )
+
+    local = store.write([{"id": "x", "content": "local update", "status": "completed"}])
+    assert store.degraded
+    assert local[0]["content"] == "local update"
+
+    failing = False
+    client.rows["hermes-todo:x"] = {
+        "rowKey": "hermes-todo:x",
+        "title": "stale remote",
+        "status": "todo",
+    }
+    now[0] = 129.9
+    assert store.read()[0]["content"] == "local update"
+    assert store.degraded
+
+    now[0] = 130.0
+    recovered = store.read()
+    assert recovered == [{"id": "x", "content": "local update", "status": "completed"}]
+    assert client.rows["hermes-todo:x"]["title"] == "local update"
+    assert client.rows["hermes-todo:x"]["status"] == "partial"
+    assert not store.degraded
+
+
+def test_write_retries_remote_projection_after_degraded_cooldown():
+    client = PlanProgressFakeClient()
+    original_get = client.get
+    failing = True
+
+    def flaky_get(path, **kwargs):
+        if failing:
+            raise RuntimeError("network down")
+        return original_get(path, **kwargs)
+
+    client.get = flaky_get
+    now = [10.0]
+    linkage = OperatingLinkage(
+        plan_id="plan-1",
+        task_id=None,
+        session_id=None,
+        executor_ref="hermes:forge",
+    )
+    store = KynverTodoStore(
+        client,
+        linkage=linkage,
+        retry_interval_seconds=5,
+        clock=lambda: now[0],
+    )
+    store.write([{"id": "x", "content": "local", "status": "pending"}])
+    assert store.degraded
+
+    failing = False
+    now[0] = 15.0
+    result = store.write([{"id": "y", "content": "synced", "status": "in_progress"}])
+
+    assert not store.degraded
+    assert client.rows["hermes-todo:y"]["title"] == "synced"
+    assert client.focus_key == "hermes-todo:y"
+    assert result[0]["id"] == "y"
+
+
+def test_merge_recovery_preserves_unrelated_remote_row_and_focus():
+    client = PlanProgressFakeClient()
+    original_get = client.get
+    failing = False
+
+    def flaky_get(path, **kwargs):
+        if failing:
+            raise RuntimeError("network down")
+        return original_get(path, **kwargs)
+
+    client.get = flaky_get
+    now = [0.0]
+    linkage = OperatingLinkage(
+        plan_id="plan-1",
+        task_id=None,
+        session_id=None,
+        executor_ref="hermes:forge",
+    )
+    store = KynverTodoStore(
+        client,
+        linkage=linkage,
+        retry_interval_seconds=30,
+        clock=lambda: now[0],
+    )
+    store.write(
+        [
+            {"id": "x", "content": "x0", "status": "pending"},
+            {"id": "y", "content": "y0", "status": "pending"},
+        ],
+        merge=False,
+    )
+
+    failing = True
+    store.write([{"id": "x", "content": "x-local", "status": "completed"}], merge=True)
+    assert store.degraded
+
+    failing = False
+    client.rows["hermes-todo:y"]["title"] = "y-remote"
+    client.rows["hermes-todo:y"]["status"] = "partial"
+    client.focus_key = "hermes-todo:y"
+    now[0] = 30.0
+
+    recovered = store.read()
+    by_id = {item["id"]: item for item in recovered}
+    assert by_id["x"] == {"id": "x", "content": "x-local", "status": "completed"}
+    assert by_id["y"] == {"id": "y", "content": "y-remote", "status": "in_progress"}
+    assert client.rows["hermes-todo:y"]["title"] == "y-remote"
+    assert client.focus_key == "hermes-todo:y"
+    assert not store.degraded
+
+
+def test_recovery_replays_multiple_degraded_writes_in_order():
+    client = PlanProgressFakeClient()
+    original_get = client.get
+    failing = True
+
+    def flaky_get(path, **kwargs):
+        if failing:
+            raise RuntimeError("network down")
+        return original_get(path, **kwargs)
+
+    client.get = flaky_get
+    now = [0.0]
+    linkage = OperatingLinkage(
+        plan_id="plan-1",
+        task_id=None,
+        session_id=None,
+        executor_ref="hermes:forge",
+    )
+    store = KynverTodoStore(
+        client,
+        linkage=linkage,
+        retry_interval_seconds=10,
+        clock=lambda: now[0],
+    )
+
+    store.write([{"id": "x", "content": "first", "status": "pending"}], merge=False)
+    store.write([{"id": "y", "content": "second", "status": "in_progress"}], merge=True)
+    assert store.degraded
+
+    failing = False
+    now[0] = 10.0
+    recovered = store.read()
+    by_id = {item["id"]: item for item in recovered}
+
+    assert by_id["x"]["content"] == "first"
+    assert by_id["y"] == {"id": "y", "content": "second", "status": "in_progress"}
+    assert client.focus_key == "hermes-todo:y"
+    assert not store.degraded
+
+
+def test_conflicting_recovery_write_does_not_starve_later_batches():
+    client = PlanProgressFakeClient()
+    original_get = client.get
+    failing = True
+
+    def flaky_get(path, **kwargs):
+        if failing:
+            raise RuntimeError("network down")
+        return original_get(path, **kwargs)
+
+    client.get = flaky_get
+    now = [0.0]
+    linkage = OperatingLinkage(
+        plan_id="plan-1",
+        task_id=None,
+        session_id=None,
+        executor_ref="hermes:forge",
+    )
+    store = KynverTodoStore(
+        client,
+        linkage=linkage,
+        retry_interval_seconds=10,
+        clock=lambda: now[0],
+    )
+
+    store.write([{"id": "x", "content": "blocked focus", "status": "in_progress"}], merge=True)
+    store.write([{"id": "y", "content": "later write", "status": "completed"}], merge=True)
+    assert store.degraded
+
+    failing = False
+    client.rows["hermes-todo:x"] = {
+        "rowKey": "hermes-todo:x",
+        "title": "leased remotely",
+        "status": "running",
+    }
+    now[0] = 10.0
+    recovered = store.read()
+    by_id = {item["id"]: item for item in recovered}
+
+    assert by_id["x"] == {"id": "x", "content": "leased remotely", "status": "pending"}
+    assert by_id["y"] == {"id": "y", "content": "later write", "status": "completed"}
+    assert client.rows["hermes-todo:x"]["status"] == "running"
+    assert client.rows["hermes-todo:y"]["status"] == "partial"
+    assert not store.degraded
+
+
 def test_idempotent_row_keys_on_repeat_write():
     client = PlanProgressFakeClient()
     linkage = OperatingLinkage(plan_id="plan-1", task_id=None, session_id=None, executor_ref="hermes:forge")
