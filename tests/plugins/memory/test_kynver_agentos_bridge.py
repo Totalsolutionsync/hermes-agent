@@ -45,6 +45,42 @@ def test_load_config_merges_profile_and_process_env(monkeypatch, tmp_path: Path)
     assert cfg.timeout == 2.5
 
 
+def test_load_config_defaults_agentos_api_to_railway_factory_host(monkeypatch, tmp_path: Path):
+    env_path = tmp_path / ".env"
+    env_path.write_text("KYNVER_API_KEY=profile-key\nKYNVER_AGENT_OS_SLUG=forge\n", encoding="utf-8")
+    monkeypatch.setattr("plugins.memory.kynver.agentos_bridge._active_env_path", lambda: env_path)
+
+    cfg = load_kynver_agentos_config({"UNRELATED": "1"})
+
+    assert cfg.api_url == "https://kynver-production.up.railway.app"
+
+
+def test_load_config_migrates_legacy_canonical_agentos_origins(monkeypatch, tmp_path: Path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "KYNVER_API_URL=https://www.kynver.com/\nKYNVER_API_KEY=profile-key\nKYNVER_AGENT_OS_SLUG=forge\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("plugins.memory.kynver.agentos_bridge._active_env_path", lambda: env_path)
+
+    cfg = load_kynver_agentos_config({"UNRELATED": "1"})
+
+    assert cfg.api_url == "https://kynver-production.up.railway.app"
+
+
+def test_load_config_preserves_custom_agentos_origin(monkeypatch, tmp_path: Path):
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "KYNVER_API_URL=https://agentos.example.test/\nKYNVER_API_KEY=profile-key\nKYNVER_AGENT_OS_SLUG=forge\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("plugins.memory.kynver.agentos_bridge._active_env_path", lambda: env_path)
+
+    cfg = load_kynver_agentos_config({"UNRELATED": "1"})
+
+    assert cfg.api_url == "https://agentos.example.test"
+
+
 def test_memory_write_mode_defaults_to_kynver_first(monkeypatch, tmp_path: Path):
     """Kynver-configured Hermes should use Kynver/MARM as primary unless explicitly opted out."""
     env_path = tmp_path / ".env"

@@ -19,7 +19,8 @@ from typing import Any, Mapping
 
 from hermes_constants import get_hermes_home
 
-_DEFAULT_API_URL = "https://www.kynver.com"
+_DEFAULT_API_URL = "https://kynver-production.up.railway.app"
+_LEGACY_AGENTOS_API_URLS = {"https://kynver.com", "https://www.kynver.com"}
 _DEFAULT_AGENT_OS_SLUG = "ghost"
 _DEFAULT_TIMEOUT_SECONDS = 3.0
 _DEFAULT_SIDE_EFFECT_TIMEOUT_SECONDS = 3.0
@@ -125,8 +126,12 @@ def load_kynver_agentos_config(
     raw_mwm = (merged.get("KYNVER_MEMORY_WRITE_MODE") or _DEFAULT_MEMORY_WRITE_MODE).strip().lower()
     memory_write_mode = raw_mwm if raw_mwm in _VALID_MEMORY_WRITE_MODES else _DEFAULT_MEMORY_WRITE_MODE
 
+    api_url = (merged.get("KYNVER_API_URL") or _DEFAULT_API_URL).strip().rstrip("/")
+    if api_url in _LEGACY_AGENTOS_API_URLS:
+        api_url = _DEFAULT_API_URL
+
     return KynverAgentOSConfig(
-        api_url=(merged.get("KYNVER_API_URL") or _DEFAULT_API_URL).strip().rstrip("/"),
+        api_url=api_url,
         api_key=(merged.get("KYNVER_API_KEY") or "").strip(),
         slug=(merged.get("KYNVER_AGENT_OS_SLUG") or _DEFAULT_AGENT_OS_SLUG).strip(),
         timeout=timeout,
