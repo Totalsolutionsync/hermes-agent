@@ -128,6 +128,39 @@ def test_circuit_breaker_half_opens_after_cooldown(monkeypatch, tmp_path):
         _cleanup(mcp_tool, "srv")
 
 
+def test_tool_domain_errors_do_not_trip_server_unreachable_breaker(monkeypatch, tmp_path):
+    """Repeated MCP ``isError`` results must not disable a healthy server."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from tools import mcp_tool
+    from tools.mcp_tool import _make_tool_handler
+
+    call_count = {"n": 0}
+
+    async def _call_tool_domain_error(*a, **kw):
+        call_count["n"] += 1
+        result = MagicMock()
+        result.isError = True
+        result.content = [MagicMock(type="text", text="parentTaskId is required")]
+        result.structuredContent = None
+        return result
+
+    _install_stub_server(mcp_tool, "srv-domain", _call_tool_domain_error)
+    mcp_tool._ensure_mcp_loop()
+
+    try:
+        handler = _make_tool_handler("srv-domain", "task_create", 10.0)
+        for _ in range(mcp_tool._CIRCUIT_BREAKER_THRESHOLD + 1):
+            parsed = json.loads(handler({}))
+            assert parsed["error"] == "parentTaskId is required"
+            assert "_mcp_tool_error" not in parsed
+
+        assert call_count["n"] == mcp_tool._CIRCUIT_BREAKER_THRESHOLD + 1
+        assert mcp_tool._server_error_counts.get("srv-domain", 0) == 0
+    finally:
+        _cleanup(mcp_tool, "srv-domain")
+
+
 def test_circuit_breaker_reopens_on_probe_failure(monkeypatch, tmp_path):
     """If the half-open probe fails, the breaker must re-arm the
     cooldown (not let every subsequent call through).
@@ -250,3 +283,46 @@ def test_circuit_breaker_cleared_on_reconnect(monkeypatch, tmp_path):
         )
     finally:
         _cleanup(mcp_tool, "srv")
+
+
+def test_auth_recovery_preserves_retry_tool_error_without_tripping_breaker(
+    monkeypatch, tmp_path
+):
+    """A post-auth-reconnect domain error is not a re-auth/server failure."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from mcp.client.auth import OAuthFlowError
+    from tools import mcp_tool
+    from tools.mcp_oauth_manager import get_manager, reset_manager_for_tests
+
+    reset_manager_for_tests()
+
+    async def _unused(*a, **kw):  # pragma: no cover
+        raise AssertionError("direct session call is not used")
+
+    _install_stub_server(mcp_tool, "srv-auth-domain", _unused)
+    mcp_tool._ensure_mcp_loop()
+    manager = get_manager()
+
+    async def _recover(name, token=None):
+        return True
+
+    monkeypatch.setattr(manager, "handle_401", _recover)
+    mcp_tool._server_error_counts["srv-auth-domain"] = 2
+
+    try:
+        result = mcp_tool._handle_auth_error_and_retry(
+            "srv-auth-domain",
+            OAuthFlowError("initial auth failure"),
+            lambda: json.dumps({
+                "error": "parentTaskId is required",
+                "_mcp_tool_error": True,
+            }),
+            "tools/call task_create",
+        )
+        assert result is not None
+        parsed = json.loads(result)
+        assert parsed == {"error": "parentTaskId is required"}
+        assert mcp_tool._server_error_counts["srv-auth-domain"] == 0
+    finally:
+        _cleanup(mcp_tool, "srv-auth-domain")

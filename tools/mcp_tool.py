@@ -1881,6 +1881,24 @@ def _reset_server_error(server_name: str) -> None:
     _server_error_counts[server_name] = 0
     _server_breaker_opened_at.pop(server_name, None)
 
+
+def _consume_mcp_tool_error_result(server_name: str, result: str) -> Optional[str]:
+    """Normalize an MCP ``isError`` payload and mark the server reachable.
+
+    ``_call`` tags protocol-level tool failures with a private marker. This
+    helper strips that marker on every return path, preserves the caller-facing
+    domain error, and closes the server-unreachable breaker. ``None`` means the
+    result was not a tagged MCP tool error.
+    """
+    try:
+        parsed = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict) or not parsed.pop("_mcp_tool_error", False):
+        return None
+    _reset_server_error(server_name)
+    return json.dumps(parsed, ensure_ascii=False)
+
 # ---------------------------------------------------------------------------
 # Auth-failure detection helpers (Task 6 of MCP OAuth consolidation)
 # ---------------------------------------------------------------------------
@@ -1968,9 +1986,10 @@ def _handle_auth_error_and_retry(
       2. If yes, set the server's ``_reconnect_event`` so the server task
          tears down the current MCP session and rebuilds it with fresh
          credentials. Wait briefly for ``_ready`` to re-fire.
-      3. Retry the operation once. Return the retry result if it produced
-         a non-error JSON payload. Otherwise return the ``needs_reauth``
-         error dict so the model stops hallucinating manual refresh.
+      3. Retry the operation once. Return a success payload or a tagged MCP
+         tool/domain error (the latter proves the server is reachable).
+         Otherwise return ``needs_reauth`` so the model stops hallucinating
+         manual refresh.
       4. Return None if ``exc`` is not an auth error, signalling the
          caller to use the generic error path.
 
@@ -2031,6 +2050,9 @@ def _handle_auth_error_and_retry(
 
         try:
             result = retry_call()
+            tool_error = _consume_mcp_tool_error_result(server_name, result)
+            if tool_error is not None:
+                return tool_error
             try:
                 parsed = json.loads(result)
                 if "error" not in parsed:
@@ -2174,6 +2196,9 @@ def _handle_session_expired_and_retry(
 
     try:
         result = retry_call()
+        tool_error = _consume_mcp_tool_error_result(server_name, result)
+        if tool_error is not None:
+            return tool_error
         try:
             parsed = json.loads(result)
             if "error" not in parsed:
@@ -2468,7 +2493,11 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 return json.dumps({
                     "error": _sanitize_error(
                         error_text or "MCP tool returned an error"
-                    )
+                    ),
+                    # Consumed by the synchronous wrapper below. An MCP
+                    # ``isError`` response proves the server is reachable;
+                    # it is a tool/domain failure, not a transport outage.
+                    "_mcp_tool_error": True,
                 }, ensure_ascii=False)
 
             # Collect text from content blocks. MCP tool results can also
@@ -2512,6 +2541,9 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         try:
             result = _call_once()
             # Check if the MCP tool itself returned an error
+            tool_error = _consume_mcp_tool_error_result(server_name, result)
+            if tool_error is not None:
+                return tool_error
             try:
                 parsed = json.loads(result)
                 if "error" in parsed:
