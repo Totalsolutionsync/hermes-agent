@@ -264,6 +264,23 @@ class TestBuildSkillsSystemPrompt:
 
 
 
+    def test_skill_policy_is_selective_not_eager(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "example"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: example\ndescription: Example workflow\n---\n",
+            encoding="utf-8",
+        )
+
+        result = build_skills_system_prompt()
+
+        assert "## Skills (selective)" in result
+        assert "Do not load skills for trivial questions" in result
+        assert "single best match first" in result
+        assert "even partially relevant" not in result
+        assert "Err on the side of loading" not in result
+
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         cat_dir = tmp_path / "skills" / "tools"
