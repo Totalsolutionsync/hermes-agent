@@ -575,9 +575,10 @@ def test_initial_connect_budget_parks_instead_of_exiting_then_revives(monkeypatc
 
 
 def test_breaker_opened_by_tool_errors_says_rejected_not_unreachable(monkeypatch, tmp_path):
-    """Three completed calls whose payload is an error still open the breaker (#10447), but the
-    open-breaker message must not claim the server is unreachable — it answered every time
-    (#11113); a single transport strike in the streak makes it "unreachable" again."""
+    """Application-error strikes (#10447) that open the breaker must not claim the server is
+    unreachable — it answered every time (#11113); a single transport strike in the streak makes
+    it "unreachable" again. MCP ``isError`` answers themselves close the breaker (Kynver fork:
+    domain errors are not outages), so the streak is driven directly."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     from tools import mcp_tool
@@ -597,7 +598,7 @@ def test_breaker_opened_by_tool_errors_says_rejected_not_unreachable(monkeypatch
     try:
         handler = _make_tool_handler("srv", "fetch", 10.0)
         for _ in range(mcp_tool._CIRCUIT_BREAKER_THRESHOLD):
-            assert "DNS lookup failed" in json.loads(handler({}))["error"]
+            mcp_tool._bump_server_error("srv", application=True)
         tripped = json.loads(handler({}))["error"].lower()
         assert "rejected" in tripped and "unreachable" not in tripped, tripped
 
@@ -610,3 +611,76 @@ def test_breaker_opened_by_tool_errors_says_rejected_not_unreachable(monkeypatch
         _cleanup(mcp_tool, "srv")
         mcp_tool._server_errors_all_application.pop("srv", None)
 
+
+
+def test_tool_domain_errors_do_not_trip_server_unreachable_breaker(monkeypatch, tmp_path):
+    """Repeated MCP ``isError`` answers come from a reachable server: they must not open the breaker."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from tools import mcp_tool
+    from tools.mcp_tool_handlers import _make_tool_handler
+
+    call_count = {"n": 0}
+
+    async def _call_tool_domain_error(*a, **kw):
+        call_count["n"] += 1
+        result = MagicMock()
+        result.is_error = True
+        block = MagicMock()
+        block.type = "text"
+        block.text = "parentTaskId is required"
+        result.content = [block]
+        result.structured_content = None
+        return result
+
+    _install_stub_server(mcp_tool, "srv-domain", _call_tool_domain_error)
+    _mcp_loop._ensure_mcp_loop()
+
+    try:
+        handler = _make_tool_handler("srv-domain", "task_create", 10.0)
+        for _ in range(mcp_tool._CIRCUIT_BREAKER_THRESHOLD + 1):
+            result = handler({})
+            assert type(result) is str
+            assert json.loads(result)["error"] == "parentTaskId is required"
+
+        assert call_count["n"] == mcp_tool._CIRCUIT_BREAKER_THRESHOLD + 1
+        assert mcp_tool._server_error_counts.get("srv-domain", 0) == 0
+    finally:
+        _cleanup(mcp_tool, "srv-domain")
+
+
+def test_auth_recovery_retry_domain_error_closes_breaker(monkeypatch, tmp_path):
+    """A domain error on the post-auth-recovery retry proves the server reachable."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from mcp.client.auth import OAuthFlowError
+    from tools import mcp_tool
+    from tools.mcp_oauth_manager import get_manager, reset_manager_for_tests
+    from tools.mcp_tool_handlers import _handle_auth_error_and_retry, _McpToolDomainError
+
+    reset_manager_for_tests()
+
+    async def _unused(*a, **kw):  # pragma: no cover
+        raise AssertionError("direct session call is not used")
+
+    _install_stub_server(mcp_tool, "srv-auth-domain", _unused)
+    _mcp_loop._ensure_mcp_loop()
+
+    async def _recover(name, token=None):
+        return True
+
+    monkeypatch.setattr(get_manager(), "handle_401", _recover)
+    mcp_tool._server_error_counts["srv-auth-domain"] = 2
+
+    try:
+        result = _handle_auth_error_and_retry(
+            "srv-auth-domain",
+            OAuthFlowError("initial auth failure"),
+            lambda: _McpToolDomainError(json.dumps({"error": "parentTaskId is required"})),
+            "tools/call task_create",
+        )
+        assert type(result) is str
+        assert json.loads(result) == {"error": "parentTaskId is required"}
+        assert mcp_tool._server_error_counts["srv-auth-domain"] == 0
+    finally:
+        _cleanup(mcp_tool, "srv-auth-domain")

@@ -146,9 +146,19 @@ def _result_is_error(result) -> bool:
         return False
 
 
+class _McpToolDomainError(str):
+    """A rendered MCP ``isError`` answer. The server responded, so this is a tool/domain failure
+    (e.g. "plan not found"), not an outage; ``_record_call_outcome`` unwraps it to a plain str."""
+
+
 def _record_call_outcome(server_name: str, result) -> Any:
-    """Breaker bookkeeping: an error payload from the tool itself still counts as a strike (#10447),
-    flagged as an application error so the open-breaker message stays truthful."""
+    """Breaker bookkeeping. An MCP ``isError`` answer proves the server reachable and closes the
+    breaker, so one failing domain call cannot take every tool on the server offline. Any other
+    error payload still counts as a strike (#10447), flagged as an application error so the
+    open-breaker message stays truthful."""
+    if isinstance(result, _McpToolDomainError):
+        _core._reset_server_error(server_name)
+        return str(result)
     if _result_is_error(result):
         _core._bump_server_error(server_name, application=True)
     else:
@@ -577,7 +587,8 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                     server._pending_call_context = None
             if getattr(server, "_mark_session_proven", None) is not None:  # round-trip done: transport healthy
                 server._mark_session_proven()
-            return _render_call_tool_result(result, server_name)
+            rendered = _render_call_tool_result(result, server_name)
+            return _McpToolDomainError(rendered) if mcp_field(result, "is_error", "isError", False) else rendered
 
         def _on_failure(exc):
             _core._bump_server_error(server_name)
