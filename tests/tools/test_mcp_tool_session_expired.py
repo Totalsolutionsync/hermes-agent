@@ -188,6 +188,44 @@ def test_call_tool_handler_reconnects_on_session_expired(monkeypatch, tmp_path):
         mcp_tool._server_error_counts.pop("wpcom", None)
 
 
+def test_session_recovery_preserves_retry_tool_error_without_tripping_breaker(
+    monkeypatch, tmp_path
+):
+    """A domain error after reconnect replaces the stale transport error."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from tools import mcp_tool
+    from tools.mcp_tool import _make_tool_handler
+
+    server, reconnect_flag = _install_stub_server("wpcom-domain")
+    mcp_tool._servers["wpcom-domain"] = server
+    mcp_tool._server_error_counts["wpcom-domain"] = 2
+    call_count = {"n": 0}
+
+    async def _call_sequence(*a, **kw):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("Invalid or expired session")
+        result = MagicMock()
+        result.isError = True
+        result.content = [MagicMock(type="text", text="parentTaskId is required")]
+        result.structuredContent = None
+        return result
+
+    server.session.call_tool = _call_sequence
+
+    try:
+        handler = _make_tool_handler("wpcom-domain", "task_create", 10.0)
+        parsed = json.loads(handler({}))
+        assert parsed == {"error": "parentTaskId is required"}
+        assert reconnect_flag.is_set()
+        assert call_count["n"] == 2
+        assert mcp_tool._server_error_counts["wpcom-domain"] == 0
+    finally:
+        mcp_tool._servers.pop("wpcom-domain", None)
+        mcp_tool._server_error_counts.pop("wpcom-domain", None)
+
+
 def test_call_tool_handler_non_session_expired_error_falls_through(
     monkeypatch, tmp_path
 ):
