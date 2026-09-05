@@ -62,6 +62,27 @@ def test_provider_exposes_memory_task_and_skill_tools():
     assert "kynver_skill_list" in names
 
 
+@pytest.mark.parametrize("k", [1, 3, 5])
+def test_explicit_memory_search_request_contract_preserves_ambient_prefetch(k):
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    provider = KynverMemoryProvider(client=client)
+    path = f"/memory?q=invoice+history&k={k}&purpose=explicit_recall"
+    client.responses[("GET", path)] = {"items": [{"content": "Invoice match"}]}
+
+    result = json.loads(
+        provider.handle_tool_call(
+            "kynver_memory_search", {"query": " invoice history ", "k": k}
+        )
+    )
+
+    assert client.calls == [("GET", path, None, None, 3.0)]
+    assert result["memories"] == [{"content": "Invoice match"}]
+    provider.prefetch("invoice history")
+    assert client.calls[-1] == ("GET", "/memory?q=invoice+history&k=5", None, None, 3.0)
+
+
 def test_prefetch_formats_authoritative_context():
     from plugins.memory.kynver import KynverMemoryProvider
 

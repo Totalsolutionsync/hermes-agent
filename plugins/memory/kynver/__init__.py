@@ -931,7 +931,7 @@ class KynverMemoryProvider(MemoryProvider):
             return tool_error("query is required")
         k = max(1, min(20, int(args.get("k") or DEFAULT_SEARCH_LIMIT)))
         payload = self._require_client().get(
-            memory_search_path(q=query, k=k),
+            memory_search_path(q=query, k=k, purpose="explicit_recall"),
             timeout=self._client_timeout,
         )
         self._mark_success("memory.search")
