@@ -48,11 +48,14 @@ class KynverTodoStore:
         if self._degraded or not self._linkage.plan_id:
             return self._local.read()
         try:
-            return reconcile_todos_from_kynver(
+            items = reconcile_todos_from_kynver(
                 self._client,
                 self._linkage,
                 self._local.read(),
+                local_scope_only=True,
             )
+            # Keep authoritative updates for subsequent partial merges/fallback.
+            return self._local.write(items)
         except KynverAgentOSError as exc:
             if not self._allow_fallback:
                 raise
@@ -65,7 +68,12 @@ class KynverTodoStore:
             return self._local.read()
 
     def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
+        previous_items = self.read() if merge else self._local.read()
         local_items = self._local.write(todos, merge=merge)
+        # Project normalized, complete rows for touched IDs only. Raw partial
+        # merges otherwise reset remote titles/statuses to defaults.
+        touched_ids = {str(t.get("id", "")).strip() or "?" for t in todos}
+        projected_items = [item for item in local_items if item["id"] in touched_ids]
 
         if self._degraded or not self._linkage.plan_id:
             return local_items
@@ -74,7 +82,7 @@ class KynverTodoStore:
             blocked = inspect_todo_write(
                 self._client,
                 self._linkage,
-                list(todos),
+                projected_items,
                 merge=merge,
             )
             if blocked:
@@ -83,11 +91,12 @@ class KynverTodoStore:
             project_todo_write(
                 self._client,
                 self._linkage,
-                list(todos),
+                projected_items,
                 merge=merge,
             )
             return self.read()
         except PreTransitionError:
+            self._local.write(previous_items)
             raise
         except KynverAgentOSError as exc:
             if not self._allow_fallback:
