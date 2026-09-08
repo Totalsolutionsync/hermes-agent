@@ -906,11 +906,13 @@ class ContextCompressor(ContextEngine):
                             # Truncate long arguments but keep enough for context
                             if len(args) > self._TOOL_ARGS_MAX:
                                 args = args[:self._TOOL_ARGS_HEAD] + "..."
-                            tc_parts.append(f"  {name}({args})")
+                            call_id = tc.get("id", "")
+                            tc_parts.append(f"  {name}({args}) [tool_call_id={call_id}]")
                         else:
                             fn = getattr(tc, "function", None)
                             name = getattr(fn, "name", "?") if fn else "?"
-                            tc_parts.append(f"  {name}(...)")
+                            call_id = getattr(tc, "id", "")
+                            tc_parts.append(f"  {name}(...) [tool_call_id={call_id}]")
                     content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
                 parts.append(f"[ASSISTANT]: {content}")
                 continue
@@ -1145,10 +1147,9 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
     ) -> Optional[str]:
         """Generate a structured summary of conversation turns.
 
-        Uses a structured template (Goal, Progress, Decisions, Resolved/Pending
-        Questions, Files, Remaining Work) with explicit preamble telling the
-        summarizer not to answer questions.  When a previous summary exists,
-        generates an iterative update instead of summarizing from scratch.
+        Uses a current-state handoff: objective/acceptance, constraints,
+        exact working state, verified evidence, and pending actions. When a
+        previous summary exists, rebuilds the handoff without an action diary.
 
         Args:
             focus_topic: Optional focus string for guided compression.  When
@@ -1189,68 +1190,53 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         )
 
         # Shared structured template (used by both paths).
-        _template_sections = f"""## Current User Ask
-[Copy the user's most recent unfulfilled request verbatim. This is the primary continuity anchor.]
+        _template_sections = f"""## Active Task
+[Latest unfulfilled objective and its acceptance criteria, including pending user asks.
+Quote exact wording only when needed to preserve meaning. Later user corrections
+supersede earlier goals. If finished, say "None" and retain the final result.]
 
-## Active Task
-[Same as Current User Ask when a single thread; otherwise list only NOT-yet-completed tasks. If none, write "None."]
+## Constraints & Decisions
+[Only constraints, permissions, preferences, and decision rationale needed to
+continue safely. Do not repeat the objective.]
 
-## Active Task/Plan IDs
-[Exact task IDs, plan IDs, branch names, PR URLs, or session keys needed to resume ops work. If none, write "None."]
+## Active State
+[Exact current working directory/worktree, branch, commit, modified paths,
+plan/task IDs, worker/process/session handles and their last observed status.
+Do not shorten identifiers or infer completion from a launch acknowledgement.]
 
-## Goal
-[What the user is trying to accomplish overall — operational objective, not a chronology.]
+## Verified Results & Evidence
+[Only results relevant to the active objective or necessary to avoid repeating
+work. Distinguish verified tool results from claims and untested changes.
+Preserve exact test commands, outcomes, artifact/log paths, tool-call IDs and
+source/session references when available. Keep evidence pointers verbatim across
+compactions; do not replace them with a lossy paraphrase of an earlier summary.
+Prefer a short result plus a retrievable evidence pointer over pasted logs.
+Never invent evidence, paths, IDs, counts, or successful verification.]
 
-## Latest Verified State
-[Current verified facts only: branch, dirty files, test status, running processes, deploy/runtime state. Prefer live-verified facts over stale memory.]
+## Pending Actions & Blockers
+[Next unfinished actions in order; unresolved failures and checks still needed.
+Include exact diagnostic excerpts only where useful. Omit unrelated completed
+history, exploratory narration, and empty sections other than Active Task.]
 
-## Open Blockers
-[Unresolved blockers/errors with exact messages. If none, write "None."]
-
-## Decisions & Constraints
-[Important decisions, preferences, and constraints that govern next actions.]
-
-## Completed Actions
-[Numbered list of concrete actions — tool, target, outcome. Avoid narrative event logs.]
-
-## Artifact Handles
-[Resolvable handles or profile paths for spilled logs/artifacts the model may need later. If none, write "None."]
-
-## Omitted History Refs
-[Count or brief note of what was compacted away; do NOT replay chronological event logs unless explicitly requested.]
-
-## Resolved Questions
-[Already-answered user questions with answers so they are not repeated.]
-
-## Pending User Asks
-[Unanswered user requests. If none, write "None."]
-
-## Relevant Files
-[Files read, modified, or created — with brief note on each.]
-
-## Remaining Work
-[What remains — framed as context, not active instructions.]
-
-## Critical Context
-[Specific values/error messages that would be lost. NEVER include secrets — write [REDACTED].]
-
-Target ~{summary_budget} tokens. Prefer operational state over chronological transcripts. Be CONCRETE with paths, commands, exit codes, and IDs.
+Use at most ~{summary_budget} tokens, not a quota. Each fact belongs in one section
+only. This is a current-state handoff, not an accumulating action diary. Preserve
+critical exact values, but NEVER credentials — use [REDACTED].
 
 Write only the summary body. Do not include any preamble or prefix."""
 
         if self._previous_summary:
-            # Iterative update: preserve existing info, add new progress
+            # Iterative update: retain relevant evidence, replace stale state.
             prompt = f"""{_summarizer_preamble}
 
 You are updating a context compaction summary. A previous compaction produced the summary below. New conversation turns have occurred since then and need to be incorporated.
 
 PREVIOUS SUMMARY:
-{self._previous_summary}
+{redact_sensitive_text(self._previous_summary)}
 
 NEW TURNS TO INCORPORATE:
 {content_to_summarize}
 
-Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new completed actions to the numbered list (continue numbering). Move answered questions to "Resolved Questions". Update "Latest Verified State" to reflect current state. Remove information only if it is clearly obsolete. CRITICAL: Update "## Current User Ask" and "## Active Task" to reflect the user's most recent unfulfilled request — these are the most important fields for task continuity. Do not expand into chronological event logs.
+Rebuild a concise current-state handoff using this structure, not a summary of summaries. Treat the previous summary as fallible context: new observed results and later user corrections take precedence. Retain still-relevant exact evidence pointers and unresolved constraints; remove superseded state and unrelated completed history. Do not append a numbered action diary or repeat facts across sections. CRITICAL: Update "## Active Task" to the latest unfulfilled objective and acceptance criteria.
 
 {_template_sections}"""
         else:
