@@ -77,6 +77,8 @@ def test_running_row_read_back_stays_pending_without_focus():
         executor_ref="hermes:forge",
     )
     store = KynverTodoStore(client, linkage=linkage)
+    # Session membership is explicit; remote rows still own status in scope.
+    store._local.write([{"id": "a", "content": "local", "status": "pending"}])
 
     items = store.read()
     assert len(items) == 1

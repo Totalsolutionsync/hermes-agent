@@ -178,7 +178,15 @@ def reconcile_todos_from_kynver(
     client: KynverAgentOSClient,
     linkage: OperatingLinkage,
     local_items: list[dict[str, Any]],
+    *,
+    local_scope_only: bool = False,
 ) -> list[dict[str, Any]]:
+    """Refresh from authoritative rows, optionally restricted to local membership.
+
+    The plan endpoint is shared and does not establish session ownership. Session
+    stores opt into local scope; explicit plan-wide callers keep the legacy union.
+    No rows are deleted, and remote status/title remain authoritative in scope.
+    """
     if not linkage.plan_id:
         return [item.copy() for item in local_items]
 
@@ -195,7 +203,7 @@ def reconcile_todos_from_kynver(
     for row in remote_rows:
         row_key = str(row.get("rowKey") or "")
         todo_id = _parse_todo_id(row_key)
-        if not todo_id:
+        if not todo_id or (local_scope_only and todo_id not in by_id):
             continue
         status = _ROW_TO_HERMES.get(str(row.get("status") or "todo"), "pending")
         if row_key == in_progress_key:
@@ -208,11 +216,12 @@ def reconcile_todos_from_kynver(
 
     if in_progress_key:
         focus_id = _parse_todo_id(in_progress_key)
-        if focus_id and focus_id in by_id:
+        if focus_id:
             for item in by_id.values():
                 if item["id"] != focus_id and item.get("status") == "in_progress":
                     item["status"] = "pending"
-            by_id[focus_id]["status"] = "in_progress"
+            if focus_id in by_id:
+                by_id[focus_id]["status"] = "in_progress"
 
     return list(by_id.values())
 
