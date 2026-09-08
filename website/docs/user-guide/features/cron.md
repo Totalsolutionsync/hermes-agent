@@ -29,6 +29,87 @@ Cron jobs use whatever provider `hermes model` selected. `hermes setup --portal`
 Cron-run sessions cannot recursively create more cron jobs. Hermes disables cron management tools inside cron executions to prevent runaway scheduling loops.
 :::
 
+## Opt-in supervised budget continuation
+
+By default, cron keeps the normal `agent.max_turns` budget and exhaustion behavior.
+For agent-backed cron jobs using the Hermes conversation loop, you can opt in to
+bounded, in-process continuation in your profile's `config.yaml`:
+
+```yaml
+cron:
+  supervised_continuation:
+    enabled: true                 # default: false
+    max_extensions: 2             # 1–5 additional slices
+    extension_iterations: 15      # 1–50 iterations per slice
+    max_seconds: 900              # 1–3600, across ALL continuation slices/reviews
+    max_tokens: 200000            # 1–2000000, across ALL continuation slices/reviews
+    supervisor_timeout: 30        # 1–120 seconds per review
+```
+
+This is a profile-wide cron setting, not a change to the global main-agent budget.
+It does not affect interactive chats or script-only jobs. `codex_app_server` and
+`acp` runtimes are not supported and fail configuration rather than silently
+ignoring supervision. Unknown keys, non-integer limits, and out-of-range values
+are rejected. Remove the section or set `enabled: false` to use legacy behavior.
+
+At budget exhaustion, a **tool-free auxiliary model** reviews the original task,
+available conversation history, paired tool results, pending tool-call IDs, and
+prior decisions. It may grant a slice only with new tool-result IDs, an explanation
+of what those outputs verify, and a concrete unfinished task within the original
+scope. Worker claims, launches, edits, and elapsed time alone are not verification.
+Repeated outputs, missing evidence, unresolved tool calls, invalid responses,
+provider errors, and timeouts stop the run without a grant. `done`, `stuck`, and
+`needs_user` also stop; conservatively these are reported as stopped runs, not as
+a successful worker final response. This evidence judgment is model-based, not a
+proof of correctness or a security boundary against malicious tool output.
+
+The reviewer uses the standard auxiliary provider router with task name
+`cron_supervisor`. Optional overrides use `auxiliary.cron_supervisor.provider`
+and `auxiliary.cron_supervisor.model`. Each review requests at most 600 output
+tokens and has no tools, tool dispatch, or application-level retry. The supervisor
+receives a projection capped at 64,000 serialized characters, not the full history:
+up to 12 recent distinct command/output pairs with call IDs, message indexes and
+output hashes, recent worker/user state, and bounded prior decisions. Omitted
+context is explicitly unknown, never evidence of success. Oversized outputs and
+commands are marked excerpts and cannot justify a grant; only complete projected
+pairs are eligible. The original scope is preserved in full up to 16,000 serialized
+characters; a larger scope stops closed rather than dropping constraints. Thus a
+long history alone does not prevent review. The full available redacted checkpoint
+is retained locally, including any material omitted from the review.
+
+**Limits and cancellation:** the continuation clock and token baseline begin at
+the first exhausted slice (the original main budget is separate). Tokens include
+reported main-agent session usage after that baseline plus supervisor usage.
+These are cooperative limits, checked before each model call, before dispatching
+tools, after review, and at completion; a single in-flight request can overshoot
+the token cap. Provider usage reporting is required for accurate accounting;
+independently budgeted delegated agents are not included in this token cap. The
+wall timer interrupts the agent, but cannot forcibly kill an uncooperative tool,
+provider, or external process. The existing cron inactivity timeout and interrupt
+handling remain active; a review does not reset the inactivity clock. A timed-out
+review can never grant later, even if its tool-free request finishes in a daemon
+thread.
+
+**Checkpoints and worker identity:** before calls and before tool dispatch, an
+atomic checkpoint is saved to `<profile-home>/cron/checkpoints/<run-id>.json`.
+It records the run/job/session/profile/workdir, original scope, tool names,
+available history (including process/delegation IDs), pending tool calls, decisions,
+and final status. The directory is mode `0700`, files `0600`, and known secret
+patterns are redacted. Redaction is best-effort: treat these as sensitive task
+records and remove old checkpoints according to your retention policy; there is
+no automatic pruning. A checkpoint write failure denies further continuation.
+
+A grant extends the **same live conversation and worker**, with the same tool
+permissions. The granted iterations are added atomically to the live budget counter
+without replacing it or erasing usage; any existing references keep the same
+accounting. Legacy uncharged grace turns are disabled for supervised slices.
+It creates no cron job, starts no replacement worker, and never
+replays a checkpoint after a crash or restart. Existing process/delegation IDs
+remain in the conversation so the worker can follow them rather than relaunching.
+This mechanism does not provide exactly-once external side effects or prevent a
+model from explicitly requesting duplicate work; normal tool safeguards still
+apply. Cron management tools remain disabled in cron runs.
+
 ## Creating scheduled tasks
 
 ### In chat with `/cron`

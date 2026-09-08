@@ -1677,12 +1677,17 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             _cron_timeout = 600.0
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
         _POLL_INTERVAL = 5.0
+        from cron.continuation import attach_continuation
+        _cron_run = attach_continuation(
+            agent, (_cfg.get("cron") or {}).get("supervised_continuation"),
+            job_id, prompt, _job_workdir,
+        )
         _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         # Preserve scheduler-scoped ContextVar state (for example skill-declared
         # env passthrough registrations) when the cron run hops into the worker
         # thread used for inactivity timeout monitoring.
         _cron_context = contextvars.copy_context()
-        _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
+        _cron_future = _cron_pool.submit(_cron_context.run, _cron_run, prompt)
         _inactivity_timeout = False
         try:
             if _cron_inactivity_limit is None:

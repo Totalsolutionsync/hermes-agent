@@ -42,6 +42,13 @@ class IterationBudget:
             self._used += 1
             return True
 
+    def extend(self, additional: int) -> None:
+        """Grant iterations without replacing a counter held by live consumers."""
+        if type(additional) is not int or additional <= 0:
+            raise ValueError("additional iterations must be a positive integer")
+        with self._lock:
+            self.max_total += additional
+
     def refund(self) -> None:
         """Give back one iteration (e.g. for execute_code turns)."""
         with self._lock:
