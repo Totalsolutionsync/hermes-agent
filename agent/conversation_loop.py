@@ -760,7 +760,30 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
-    while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+    # Scheduler installs this only for explicitly opted-in cron runs. Keep the
+    # configured main budget unchanged and extend only this live loop's slice.
+    _continuation = getattr(agent, "_cron_continuation", None)
+    _slice_limit = agent.max_iterations
+    while True:
+        _exhausted = api_call_count >= _slice_limit or agent.iteration_budget.remaining <= 0
+        if _continuation is not None:
+            # Supervised slices never inherit the legacy uncharged grace turn.
+            agent._budget_grace_call = False
+            _extra = _continuation.before_call(messages, api_call_count, _exhausted)
+            if _extra < 0:
+                _turn_exit_reason = "cron_continuation_" + _continuation.status
+                final_response = ("Cron run stopped: " + _continuation.status
+                                  + ". Checkpoint: " + str(_continuation.path))
+                failed = True
+                interrupted = agent._interrupt_requested
+                messages.append({"role": "assistant", "content": final_response})
+                break
+            if _extra:
+                _slice_limit = api_call_count + _extra
+                agent.iteration_budget.extend(_extra)
+                _exhausted = False
+        if _exhausted and not agent._budget_grace_call:
+            break
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()
 
@@ -3818,6 +3841,8 @@ def run_conversation(
                     except Exception:
                         pass
 
+                if _continuation is not None:
+                    _continuation.check_before_tools(messages, api_call_count)
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
                 if agent._tool_guardrail_halt_decision is not None:
@@ -4297,7 +4322,7 @@ def run_conversation(
             # role-alternation invariants.
 
             # If we're near the limit, break to avoid infinite loops
-            if api_call_count >= agent.max_iterations - 1:
+            if api_call_count >= _slice_limit - 1:
                 _turn_exit_reason = f"error_near_max_iterations({error_msg[:80]})"
                 final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
                 # Append as assistant so the history stays valid for
@@ -4305,7 +4330,7 @@ def run_conversation(
                 messages.append({"role": "assistant", "content": final_response})
                 break
     
-    if final_response is None and (
+    if _continuation is None and final_response is None and (
         api_call_count >= agent.max_iterations
         or agent.iteration_budget.remaining <= 0
     ):
@@ -4379,7 +4404,8 @@ def run_conversation(
     # Determine if conversation completed successfully
     completed = (
         final_response is not None
-        and api_call_count < agent.max_iterations
+        and (api_call_count < agent.max_iterations if _continuation is None
+             else _turn_exit_reason.startswith("text_response") and not interrupted)
         and not failed
     )
 
