@@ -122,7 +122,7 @@ def test_todo_observer_mirrors_via_generic_hook_and_returns_metadata():
     provider.initialize("session-1", platform="cli")
     result = json.dumps({"todos": [{"id": "1", "content": "Ship", "status": "completed"}]})
 
-    annotation = provider.on_tool_observed("todo", {"merge": True}, result, {"tool_call_id": "call-1"})
+    annotation = provider.on_tool_observed("todo_list", {"merge": True}, result, {"tool_call_id": "call-1"})
 
     assert annotation == {"provider": "kynver", "todo_mirror": "synced", "count": 1, "state_updates": 1}
     create_call = [call for call in client.calls if call[1] == "/tasks"][0]
@@ -335,7 +335,7 @@ def test_authoritative_context_is_conditional_on_mode_memory_and_health():
 
 def test_system_prompt_keeps_local_memory_when_kynver_not_authoritative():
     from agent.memory_manager import MemoryManager
-    from agent.system_prompt import build_system_prompt_parts
+    from agent.system_prompt import _memory_parts
     from plugins.memory.kynver import KynverMemoryProvider
 
     class Store:
@@ -349,36 +349,21 @@ def test_system_prompt_keeps_local_memory_when_kynver_not_authoritative():
     manager = MemoryManager()
     manager.add_provider(provider)
     agent = SimpleNamespace(
-        load_soul_identity=False,
-        skip_context_files=True,
-        valid_tool_names=set(),
-        _kanban_worker_guidance="",
-        provider="",
-        model="",
-        platform="cli",
-        _tool_use_enforcement=False,
         _memory_manager=manager,
         _memory_store=Store(),
         _memory_enabled=True,
         _user_profile_enabled=True,
-        pass_session_id=False,
-        session_id="session-1",
     )
 
-    with (
-        patch("run_agent.load_soul_md", return_value=""),
-        patch("run_agent.build_nous_subscription_prompt", return_value=""),
-        patch("run_agent.build_environment_hints", return_value=""),
-    ):
-        parts = build_system_prompt_parts(agent)
+    volatile = "\n\n".join(_memory_parts(agent))
 
-    assert "LOCAL MEMORY" in parts["volatile"]
-    assert "LOCAL USER" in parts["volatile"]
+    assert "LOCAL MEMORY" in volatile
+    assert "LOCAL USER" in volatile
 
 
 def test_system_prompt_suppresses_local_memory_after_kynver_recovers():
     from agent.memory_manager import MemoryManager
-    from agent.system_prompt import build_system_prompt_parts
+    from agent.system_prompt import _memory_parts
     from plugins.memory.kynver import KynverMemoryProvider
 
     class Store:
@@ -394,31 +379,16 @@ def test_system_prompt_suppresses_local_memory_after_kynver_recovers():
     manager = MemoryManager()
     manager.add_provider(provider)
     agent = SimpleNamespace(
-        load_soul_identity=False,
-        skip_context_files=True,
-        valid_tool_names=set(),
-        _kanban_worker_guidance="",
-        provider="",
-        model="",
-        platform="cli",
-        _tool_use_enforcement=False,
         _memory_manager=manager,
         _memory_store=Store(),
         _memory_enabled=True,
         _user_profile_enabled=True,
-        pass_session_id=False,
-        session_id="session-1",
     )
 
-    with (
-        patch("run_agent.load_soul_md", return_value=""),
-        patch("run_agent.build_nous_subscription_prompt", return_value=""),
-        patch("run_agent.build_environment_hints", return_value=""),
-    ):
-        parts = build_system_prompt_parts(agent)
+    volatile = "\n\n".join(_memory_parts(agent))
 
-    assert "LOCAL MEMORY" not in parts["volatile"]
-    assert "LOCAL USER" not in parts["volatile"]
+    assert "LOCAL MEMORY" not in volatile
+    assert "LOCAL USER" not in volatile
 
 
 # ---------------------------------------------------------------------------
@@ -962,3 +932,27 @@ def test_on_tool_observed_memory_write_off_mode_produces_no_kynver_write():
     memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
     assert not memory_posts, "off mode via on_tool_observed must produce no Kynver memory writes"
     assert annotation == {"provider": "kynver", "memory_mirror": "off", "durable": False}
+
+
+def test_core_mirror_then_observer_writes_kynver_once():
+    """The core mirror (notify_memory_tool_write) and the agent-loop observer both see one
+    memory tool call; Kynver must receive exactly one write and the observer still annotates."""
+    from agent.memory_manager import MemoryManager
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.memory_write_mode = "mirror"
+    client.config.session_sync_disabled = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-live-4", platform="cli")
+    manager = MemoryManager()
+    manager.add_provider(provider)
+
+    args = {"action": "add", "content": "Kynver AgentOS task routing rules.", "target": "memory"}
+    result = json.dumps({"success": True})
+    manager.notify_memory_tool_write(result, args, build_metadata=lambda: {"tool_call_id": "tc-dup"})
+    annotations = manager.on_tool_observed("memory", args, result, metadata={"tool_call_id": "tc-dup"})
+
+    memory_posts = [c for c in client.calls if c[0] == "POST" and c[1] == "/memory"]
+    assert len(memory_posts) == 1
+    assert {"provider": "kynver", "memory_mirror": "synced"} in annotations

@@ -1,7 +1,7 @@
 """Hermes plugin hooks — pre-transition guards for Kynver todo writes.
 
 Projection and read-back live on :class:`KynverTodoStore`; hooks only block
-illegal focus transitions before the built-in ``todo`` tool runs.
+illegal focus transitions before the built-in ``todo_list`` tool runs.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from typing import Any, Optional
 from .agentos_bridge import KynverAgentOSClient, agentos_enabled, load_kynver_agentos_config
 from .operating_config import kynver_operating_tools_enabled, load_operating_linkage
 from .plan_progress import inspect_todo_write
+from .pre_transition import TODO_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ def on_pre_tool_call(
     args: Any = None,
     **_: Any,
 ) -> Optional[dict[str, Any]]:
-    if tool_name != "todo":
+    if tool_name not in TODO_TOOL_NAMES:
         return None
     if not isinstance(args, dict):
         return None

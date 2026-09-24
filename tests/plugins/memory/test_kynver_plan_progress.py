@@ -205,7 +205,7 @@ def test_pre_tool_call_blocks_todo_when_projection_blocked(monkeypatch):
     )
 
     block = on_pre_tool_call(
-        tool_name="todo",
+        tool_name="todo_list",
         args={
             "todos": [{"id": "a", "content": "Step", "status": "in_progress"}],
             "merge": False,

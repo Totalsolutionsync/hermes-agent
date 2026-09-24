@@ -36,7 +36,7 @@ from .contract import (
     task_update_path,
     todo_to_task_record,
 )
-from .pre_transition import normalize_hermes_status
+from .pre_transition import TODO_TOOL_NAMES, normalize_hermes_status
 from .schemas import ALL_TOOL_SCHEMAS
 
 logger = logging.getLogger(__name__)
@@ -282,6 +282,9 @@ class KynverMemoryProvider(MemoryProvider):
         self._last_error = ""
         self._last_success = ""
         self._degraded_lock = threading.Lock()
+        # tool_call_id -> annotation for memory writes the core mirror already routed, so the
+        # agent-loop observer reports them instead of writing to Kynver a second time.
+        self._routed_memory_calls: Dict[str, Dict[str, Any]] = {}
 
     @property
     def name(self) -> str:
@@ -559,15 +562,20 @@ class KynverMemoryProvider(MemoryProvider):
             f"tool.{tool_name}",
             metadata={"args": args, "resultPreview": str(result)[:500], **(metadata or {})},
         )
-        if tool_name == "todo" and not self._todo_disabled:
+        if tool_name in TODO_TOOL_NAMES and not self._todo_disabled:
             return self._mirror_todo(args, result, metadata or {})
         if tool_name == "memory":
+            call_id = str((metadata or {}).get("tool_call_id") or "")
+            with self._degraded_lock:
+                routed = self._routed_memory_calls.pop(call_id, None) if call_id else None
             try:
                 payload = json.loads(result) if isinstance(result, str) else result
             except Exception:
                 payload = None
             if isinstance(payload, dict) and payload.get("kynverMemoryPrimary"):
                 return None
+            if routed is not None:
+                return routed
             action = str(args.get("action") or "")
             if action in {"add", "replace"}:
                 return self._mirror_memory_write(action, args, metadata or {})
@@ -729,7 +737,7 @@ class KynverMemoryProvider(MemoryProvider):
         with self._degraded_lock:
             degraded_before = self._degraded_reason
         # Route through the M4 hub: handles mode, scope, idempotency, and correction audit.
-        self.on_memory_write(action, target, content, metadata)
+        self._route_memory_write(action, target, content, metadata)
         # Build annotation from pre-computed routing state (on_memory_write returns None).
         if write_mode == "off":
             return {"provider": "kynver", "memory_mirror": "off", "durable": False}
@@ -797,6 +805,29 @@ class KynverMemoryProvider(MemoryProvider):
         )
 
     def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Core mirror entry point (``MemoryManager.notify_memory_tool_write``, first-class writes).
+
+        Routes through the M4 hub and remembers the outcome per ``tool_call_id`` so the
+        agent-loop observer annotates the tool result without a second Kynver write."""
+        meta = dict(metadata or {})
+        if (action or "").strip().lower() not in {"add", "replace"}:
+            self._route_memory_write(action, target, content, meta)
+            return
+        annotation = self._mirror_memory_write(action, {"target": target, "content": content}, meta)
+        call_id = str(meta.get("tool_call_id") or "")
+        if call_id and annotation is not None:
+            with self._degraded_lock:
+                while len(self._routed_memory_calls) >= 256:
+                    self._routed_memory_calls.pop(next(iter(self._routed_memory_calls)))
+                self._routed_memory_calls[call_id] = annotation
+
+    def _route_memory_write(
         self,
         action: str,
         target: str,

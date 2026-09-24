@@ -9,6 +9,9 @@ class PreTransitionError(ValueError):
     """Todo or focus transition rejected before calling Kynver."""
 
 
+# Hermes renamed the todo tool to ``todo_list``; ``todo`` stays for pre-rename replays.
+TODO_TOOL_NAMES = frozenset({"todo_list", "todo"})
+
 HERMES_STATUSES = frozenset({"pending", "in_progress", "completed", "cancelled"})
 KYNVER_ROW_STATUSES = frozenset({"todo", "in_progress", "running", "partial", "blocked", "done"})
 
