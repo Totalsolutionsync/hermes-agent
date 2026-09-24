@@ -226,22 +226,31 @@ def check_systemd_timing_alignment(
 
 
 def _systemd_timeout_stop_us(unit_name: str) -> Optional[int]:
-    """``TimeoutStopUSec`` of ``unit_name`` in microseconds; ``--user`` first (hermes' usual)."""
+    """``TimeoutStopUSec`` of ``unit_name`` in microseconds; ``--user`` first (hermes' usual).
+
+    ``systemctl show`` exits 0 for a unit the manager has never loaded and reports the
+    manager's DefaultTimeoutStopSec (90s) with ``LoadState=not-found``. A system-level gateway
+    has no ``--user`` unit, so trusting that phantom value warned about a stale unit that
+    does not exist. Only a loaded unit's timeout counts.
+    """
     for flag in (["--user"], []):
         try:
             result = subprocess.run(
-                ["systemctl", *flag, "show", unit_name, "--property=TimeoutStopUSec"],
+                ["systemctl", *flag, "show", unit_name, "--property=TimeoutStopUSec,LoadState"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=2.0,
             )
         except (subprocess.TimeoutExpired, OSError):
             continue
-        # Output: "TimeoutStopUSec=1min 30s" or "TimeoutStopUSec=90000000"
-        for line in result.stdout.splitlines() if result.returncode == 0 else ():
-            if line.startswith("TimeoutStopUSec="):
-                value = line.split("=", 1)[1].strip()
-                timeout_us = int(value) if value.isdigit() else parse_systemd_duration_to_us(value)
-                if timeout_us is not None:
-                    return timeout_us
+        if result.returncode != 0:
+            continue
+        # Output: "TimeoutStopUSec=1min 30s" or "TimeoutStopUSec=90000000", plus "LoadState=loaded"
+        props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+        if props.get("LoadState", "").strip() != "loaded":
+            continue
+        value = props.get("TimeoutStopUSec", "").strip()
+        timeout_us = int(value) if value.isdigit() else parse_systemd_duration_to_us(value)
+        if timeout_us is not None:
+            return timeout_us
     return None
 
 
