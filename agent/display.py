@@ -146,9 +146,14 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
         return override
     try:
         from tools.registry import registry
-        return registry.get_emoji(tool_name, default="") or default
+        emoji = registry.get_emoji(tool_name, default="")
     except Exception:
-        return default
+        emoji = ""
+    # Memory-provider tool schemas are injected outside the registry.
+    return emoji or next((e for prefix, e in _PROVIDER_TOOL_EMOJIS if tool_name.startswith(prefix)), default)
+
+
+_PROVIDER_TOOL_EMOJIS = (("kynver_memory_", "🧠"), ("kynver_task_", "📋"), ("kynver_skill_", "🧩"))
 
 
 # ── Tool preview (one-line summary of a tool call's primary argument) ─────
@@ -425,6 +430,14 @@ def _preview_memory(args: dict, _max_len: int) -> str:
     return action
 
 
+def _preview_kynver_memory_write(args: dict, _max_len: int) -> str:
+    prefix = _oneline(args.get("memoryType", "fact") or "fact")
+    key = _oneline(args.get("key", "") or "")
+    if key:
+        prefix += f"/{key[:18]}"
+    return f"{prefix}: \"{_clip(_oneline(args.get('content', '')), 25)}\""
+
+
 def _preview_send_message(args: dict, _max_len: int) -> str:
     return f"to {args.get('target', '?')}: \"{_tail_trunc(_oneline(args.get('message', '')), 20)}\""
 
@@ -452,7 +465,8 @@ _PREVIEW_BUILDERS = {
     "browser_exec": _preview_browser_exec, "delegate_task": _preview_delegate_task,
     "process_manage": _preview_process_manage, "todo_list": _preview_todo_list,
     "terminal": _preview_shell("command"), "execute_code": _preview_shell("code"),
-    "read_file": _preview_read_file, "memory": _preview_memory, "send_message": _preview_send_message,
+    "read_file": _preview_read_file, "memory": _preview_memory,
+    "kynver_memory_write": _preview_kynver_memory_write, "send_message": _preview_send_message,
     "skill_view": _preview_skill_view,
     "session_search": lambda args, _m: f"recall: \"{_clip(_oneline(args.get('query', '')), 25)}\"",
     "tool_call": _preview_bridge_call("tool_call"),

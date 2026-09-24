@@ -305,6 +305,10 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
 MEMORY_SCHEMA = {
     "name": "memory",
     "description": (
+        "Compatibility memory tool for Hermes-local/user-profile memory. "
+        "If a first-class provider-specific memory tool is available (for example, "
+        "kynver_memory_write / kynver_memory_search in Kynver AgentOS sessions), use "
+        "that provider-specific tool instead of this compatibility wrapper.\n\n"
         "Save durable facts to persistent memory that survive across sessions. Memory is "
         "injected into every future turn, so keep entries compact and high-signal.\n\n"
         "HOW: make ALL your changes in ONE call via an 'operations' array (each item: "
