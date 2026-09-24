@@ -2342,6 +2342,10 @@ DEFAULT_CONFIG = {
         # merge origin/<target> INTO it after leaving a pre-update-<stamp> tag; a conflict stops the
         # update cleanly. `hermes update --switch-branch` overrides to switch for one run.
         "parked_branch_strategy": "switch",
+        # Maintained patch branch the checkout must never leave (e.g. a private fork's branch). When
+        # set, updates on it always merge origin/<target> in place (strategy/--switch-branch ignored);
+        # on any other branch the code update is SKIPPED loudly instead of running without the patches.
+        "pinned_branch": "",
         # Refresh an installed cua-driver during `hermes update` (best-effort, macOS only). Turn off
         # e.g. on non-admin accounts where /Applications isn't writable.
         "refresh_cua_driver": True,

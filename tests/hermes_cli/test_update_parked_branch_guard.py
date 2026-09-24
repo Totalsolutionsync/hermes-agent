@@ -411,6 +411,59 @@ def test_switch_branch_flag_overrides_in_place_strategy(
     )
 
 
+def test_pinned_branch_is_updated_in_place_and_never_left(
+    repo_pair, monkeypatch, capsys
+):
+    """updates.pinned_branch: the checkout stays on the pinned branch and origin/main's code
+    arrives, even when the branch looks fully merged and --switch-branch is not passed."""
+    import hermes_cli.config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config, "load_config", lambda: {"updates": {"pinned_branch": "old-feature"}})
+    _patch_update_flow(monkeypatch, repo_pair)
+
+    class _StopFlow(Exception):
+        pass
+
+    monkeypatch.setattr(
+        hermes_main,
+        "_abort_dependency_sync_if_self_locked",
+        lambda *a, **k: (_ for _ in ()).throw(_StopFlow()),
+    )
+    args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
+
+    with pytest.raises(_StopFlow):
+        hermes_main.cmd_update(args)
+
+    assert "CODE UPDATE SKIPPED" not in capsys.readouterr().out
+    assert _git(repo_pair, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "old-feature"
+    assert (repo_pair / "b.txt").exists()
+
+
+def test_pinned_branch_skips_update_loudly_when_checkout_left_it(
+    repo_pair, monkeypatch, capsys
+):
+    """Checkout already moved off the pinned branch (the 2026-09-24 incident shape): the update
+    must refuse with exit 1 and leave HEAD untouched instead of running without the patches."""
+    import hermes_cli.config as hermes_config
+
+    monkeypatch.setattr(
+        hermes_config, "load_config", lambda: {"updates": {"pinned_branch": "old-feature"}})
+    _git(repo_pair, "checkout", "-q", "main")
+    head_before = _git(repo_pair, "rev-parse", "HEAD").stdout.strip()
+    _patch_update_flow(monkeypatch, repo_pair)
+    args = SimpleNamespace(branch=None, yes=False, force=False, force_venv=False)
+
+    with pytest.raises(SystemExit) as exc_info:
+        hermes_main.cmd_update(args)
+
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "CODE UPDATE SKIPPED" in out and "old-feature" in out
+    assert _git(repo_pair, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
+    assert _git(repo_pair, "rev-parse", "HEAD").stdout.strip() == head_before
+
+
 def test_update_auto_switches_clean_merged_parked_branch(
     repo_pair, monkeypatch, capsys
 ):

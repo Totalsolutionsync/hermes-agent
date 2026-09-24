@@ -96,7 +96,8 @@ from hermes_cli.update_cmd_git import (  # noqa: F401
     _discard_lockfile_churn, _ensure_non_trampoline_git, _get_origin_url, _git_is_trampoline,
     _has_upstream_remote, _is_fork, _locate_real_git, _mark_skip_upstream_prompt,
     _normalize_managed_eol, _portable_git_candidates, _print_fetch_failure,
-    _print_parked_branch_kept_notice, _print_parked_branch_skip_warning,
+    _pinned_update_branch, _print_parked_branch_kept_notice, _print_parked_branch_skip_warning,
+    _print_pinned_branch_refusal,
     _prune_orphan_rescue_refs, _should_skip_upstream_prompt, _sync_fork_with_upstream,
     _sync_with_upstream_if_needed)
 from hermes_cli.update_cmd_maint import (  # noqa: F401
@@ -946,7 +947,19 @@ def _apply_parked_branch_guard(
     INTO the branch, checkout never moves; --switch-branch overrides once); dirty/unverifiable ->
     touch nothing, warn, ``sys.exit(1)`` with the code update SKIPPED (also when the target is
     missing). Returns ``(parked_branch_switched, in_place_update, switch_block_reason)``.
+
+    updates.pinned_branch overrides all of that: on the pinned branch the update is always in
+    place; anywhere else (or with --switch-branch) it is SKIPPED, so patches are never silently left.
     """
+    pinned = _pinned_update_branch()
+    if pinned and pinned != branch:
+        if current_branch != pinned or switch_branch:
+            _print_pinned_branch_refusal(_m().PROJECT_ROOT, current_branch, pinned, branch, switch_branch)
+            print(f"\n⚠ Update finished — code update SKIPPED{_branch_head_suffix(git_cmd, _m().PROJECT_ROOT)}")
+            _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
+            sys.exit(1)
+        print(f"  ℹ On pinned branch '{pinned}' — updating it in place from origin/{branch}.")
+        return False, True, None
     if current_branch == branch or current_branch == "HEAD":
         return False, False, None
     switch_safe, switch_block_reason = _m()._assess_parked_branch_switch(

@@ -176,6 +176,30 @@ def _print_parked_branch_kept_notice(current_branch: str, target_branch: str, un
     )
 
 
+def _pinned_update_branch() -> str:
+    """``updates.pinned_branch``: a maintained patch branch the checkout must never leave ("" = unset)."""
+    from hermes_cli.update_cmd import _updates_config
+    try:
+        return str(_updates_config().get("pinned_branch") or "").strip()
+    except Exception as exc:
+        logger.debug("Could not read updates.pinned_branch: %s", exc)
+        return ""
+
+
+def _print_pinned_branch_refusal(cwd: Path, current_branch: str, pinned: str, target_branch: str, switch_branch: bool) -> None:
+    """LOUD block: the update would leave the pinned patch branch, so nothing was touched."""
+    why = ("--switch-branch would move the checkout off it" if switch_branch
+           else f"the checkout is on '{current_branch}', not the pinned branch")
+    print(f"\n{_BAR}\n⚠ CODE UPDATE SKIPPED — updates.pinned_branch is '{pinned}'")
+    print(f"  Refusing to update: {why}. Updating here would run without the pinned patches.")
+    print(
+        f"\n  To resolve, return to the pinned branch and update it in place from origin/{target_branch}:\n"
+        f"    git -C {cwd} status\n"
+        f"    git -C {cwd} checkout {pinned} && hermes update\n"
+        f"  (or remove updates.pinned_branch from config.yaml to follow {target_branch} directly)\n{_BAR}"
+    )
+
+
 OFFICIAL_REPO_URLS = {
     "https://github.com/NousResearch/hermes-agent.git",
     "git@github.com:NousResearch/hermes-agent.git",
