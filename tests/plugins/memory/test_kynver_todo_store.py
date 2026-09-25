@@ -42,7 +42,7 @@ def test_todo_write_projects_in_progress_focus_not_running():
     linkage = OperatingLinkage(
         plan_id="plan-1",
         task_id="task-1",
-        session_id="sess-1",
+        session_id="s1",
         executor_ref="hermes:forge",
     )
     store = KynverTodoStore(client, linkage=linkage)
@@ -55,7 +55,7 @@ def test_todo_write_projects_in_progress_focus_not_running():
     assert items[0]["status"] == "in_progress"
     focus_calls = [c for c in client.calls if c[0] == "POST" and str(c[1]).endswith("progress-focus")]
     assert focus_calls
-    assert focus_calls[0][2]["rowKey"] == "hermes-todo:a"
+    assert focus_calls[0][2]["rowKey"] == "hermes-todo:s1:a"
     row_posts = [c for c in client.calls if c[0] == "POST" and str(c[1]).endswith("progress-rows")]
     assert row_posts
     assert row_posts[0][2]["rows"][0]["status"] == "in_progress"
@@ -64,8 +64,8 @@ def test_todo_write_projects_in_progress_focus_not_running():
 
 def test_running_row_read_back_stays_pending_without_focus():
     client = PlanProgressFakeClient()
-    client.rows["hermes-todo:a"] = {
-        "rowKey": "hermes-todo:a",
+    client.rows["hermes-todo:s1:a"] = {
+        "rowKey": "hermes-todo:s1:a",
         "title": "Lease row",
         "status": "running",
     }
@@ -73,7 +73,7 @@ def test_running_row_read_back_stays_pending_without_focus():
     linkage = OperatingLinkage(
         plan_id="plan-1",
         task_id=None,
-        session_id=None,
+        session_id="s1",
         executor_ref="hermes:forge",
     )
     store = KynverTodoStore(client, linkage=linkage)
@@ -90,7 +90,7 @@ def test_degraded_fallback_on_agentos_failure():
         raise RuntimeError("network down")
 
     client.get = fail_get
-    linkage = OperatingLinkage(plan_id="plan-1", task_id=None, session_id=None, executor_ref="hermes:forge")
+    linkage = OperatingLinkage(plan_id="plan-1", task_id=None, session_id="s1", executor_ref="hermes:forge")
     store = KynverTodoStore(client, linkage=linkage, allow_fallback=True)
 
     written = store.write([{"id": "x", "content": "local", "status": "pending"}], merge=False)
@@ -113,7 +113,7 @@ def test_degraded_store_recovers_after_retry_interval():
     linkage = OperatingLinkage(
         plan_id="plan-1",
         task_id=None,
-        session_id=None,
+        session_id="s1",
         executor_ref="hermes:forge",
     )
     store = KynverTodoStore(
@@ -129,8 +129,8 @@ def test_degraded_store_recovers_after_retry_interval():
     assert local[0]["content"] == "local update"
 
     failing = False
-    client.rows["hermes-todo:x"] = {
-        "rowKey": "hermes-todo:x",
+    client.rows["hermes-todo:s1:x"] = {
+        "rowKey": "hermes-todo:s1:x",
         "title": "stale remote",
         "status": "todo",
     }
@@ -141,8 +141,8 @@ def test_degraded_store_recovers_after_retry_interval():
     now[0] = 130.0
     recovered = store.read()
     assert recovered == [{"id": "x", "content": "local update", "status": "completed"}]
-    assert client.rows["hermes-todo:x"]["title"] == "local update"
-    assert client.rows["hermes-todo:x"]["status"] == "partial"
+    assert client.rows["hermes-todo:s1:x"]["title"] == "local update"
+    assert client.rows["hermes-todo:s1:x"]["status"] == "partial"
     assert not store.degraded
 
 
@@ -161,7 +161,7 @@ def test_write_retries_remote_projection_after_degraded_cooldown():
     linkage = OperatingLinkage(
         plan_id="plan-1",
         task_id=None,
-        session_id=None,
+        session_id="s1",
         executor_ref="hermes:forge",
     )
     store = KynverTodoStore(
@@ -178,8 +178,8 @@ def test_write_retries_remote_projection_after_degraded_cooldown():
     result = store.write([{"id": "y", "content": "synced", "status": "in_progress"}])
 
     assert not store.degraded
-    assert client.rows["hermes-todo:y"]["title"] == "synced"
-    assert client.focus_key == "hermes-todo:y"
+    assert client.rows["hermes-todo:s1:y"]["title"] == "synced"
+    assert client.focus_key == "hermes-todo:s1:y"
     assert result[0]["id"] == "y"
 
 
@@ -198,7 +198,7 @@ def test_merge_recovery_preserves_unrelated_remote_row_and_focus():
     linkage = OperatingLinkage(
         plan_id="plan-1",
         task_id=None,
-        session_id=None,
+        session_id="s1",
         executor_ref="hermes:forge",
     )
     store = KynverTodoStore(
@@ -220,17 +220,17 @@ def test_merge_recovery_preserves_unrelated_remote_row_and_focus():
     assert store.degraded
 
     failing = False
-    client.rows["hermes-todo:y"]["title"] = "y-remote"
-    client.rows["hermes-todo:y"]["status"] = "partial"
-    client.focus_key = "hermes-todo:y"
+    client.rows["hermes-todo:s1:y"]["title"] = "y-remote"
+    client.rows["hermes-todo:s1:y"]["status"] = "partial"
+    client.focus_key = "hermes-todo:s1:y"
     now[0] = 30.0
 
     recovered = store.read()
     by_id = {item["id"]: item for item in recovered}
     assert by_id["x"] == {"id": "x", "content": "x-local", "status": "completed"}
     assert by_id["y"] == {"id": "y", "content": "y-remote", "status": "in_progress"}
-    assert client.rows["hermes-todo:y"]["title"] == "y-remote"
-    assert client.focus_key == "hermes-todo:y"
+    assert client.rows["hermes-todo:s1:y"]["title"] == "y-remote"
+    assert client.focus_key == "hermes-todo:s1:y"
     assert not store.degraded
 
 
@@ -249,7 +249,7 @@ def test_recovery_replays_multiple_degraded_writes_in_order():
     linkage = OperatingLinkage(
         plan_id="plan-1",
         task_id=None,
-        session_id=None,
+        session_id="s1",
         executor_ref="hermes:forge",
     )
     store = KynverTodoStore(
@@ -270,7 +270,7 @@ def test_recovery_replays_multiple_degraded_writes_in_order():
 
     assert by_id["x"]["content"] == "first"
     assert by_id["y"] == {"id": "y", "content": "second", "status": "in_progress"}
-    assert client.focus_key == "hermes-todo:y"
+    assert client.focus_key == "hermes-todo:s1:y"
     assert not store.degraded
 
 
@@ -289,7 +289,7 @@ def test_conflicting_recovery_write_does_not_starve_later_batches():
     linkage = OperatingLinkage(
         plan_id="plan-1",
         task_id=None,
-        session_id=None,
+        session_id="s1",
         executor_ref="hermes:forge",
     )
     store = KynverTodoStore(
@@ -304,8 +304,8 @@ def test_conflicting_recovery_write_does_not_starve_later_batches():
     assert store.degraded
 
     failing = False
-    client.rows["hermes-todo:x"] = {
-        "rowKey": "hermes-todo:x",
+    client.rows["hermes-todo:s1:x"] = {
+        "rowKey": "hermes-todo:s1:x",
         "title": "leased remotely",
         "status": "running",
     }
@@ -315,32 +315,33 @@ def test_conflicting_recovery_write_does_not_starve_later_batches():
 
     assert by_id["x"] == {"id": "x", "content": "leased remotely", "status": "pending"}
     assert by_id["y"] == {"id": "y", "content": "later write", "status": "completed"}
-    assert client.rows["hermes-todo:x"]["status"] == "running"
-    assert client.rows["hermes-todo:y"]["status"] == "partial"
+    assert client.rows["hermes-todo:s1:x"]["status"] == "running"
+    assert client.rows["hermes-todo:s1:y"]["status"] == "partial"
     assert not store.degraded
 
 
 def test_idempotent_row_keys_on_repeat_write():
     client = PlanProgressFakeClient()
-    linkage = OperatingLinkage(plan_id="plan-1", task_id=None, session_id=None, executor_ref="hermes:forge")
+    linkage = OperatingLinkage(plan_id="plan-1", task_id=None, session_id="s1", executor_ref="hermes:forge")
     store = KynverTodoStore(client, linkage=linkage)
 
     store.write([{"id": "same", "content": "v1", "status": "pending"}], merge=False)
     store.write([{"id": "same", "content": "v2", "status": "completed"}], merge=True)
 
-    assert client.rows["hermes-todo:same"]["title"] == "v2"
-    assert client.rows["hermes-todo:same"]["status"] == "partial"
+    assert client.rows["hermes-todo:s1:same"]["title"] == "v2"
+    assert client.rows["hermes-todo:s1:same"]["status"] == "partial"
 
 
 def test_project_todo_write_never_sets_running_status():
     client = MagicMock()
     client.get.return_value = {"items": []}
-    linkage = OperatingLinkage(plan_id="p", task_id="t", session_id=None, executor_ref="hermes:forge")
+    linkage = OperatingLinkage(plan_id="p", task_id="t", session_id="s1", executor_ref="hermes:forge")
     project_todo_write(
         client,
         linkage,
         [{"id": "1", "content": "x", "status": "in_progress"}],
         merge=False,
+        scope="s1",
     )
     row_body = next(c.args[1] for c in client.post.call_args_list if "progress-rows" in c.args[0])
     assert row_body["rows"][0]["status"] == "in_progress"

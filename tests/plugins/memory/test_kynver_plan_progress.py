@@ -15,9 +15,9 @@ from plugins.memory.kynver.plan_progress import (
 from plugins.memory.kynver.pre_transition import PreTransitionError, hermes_row_key
 
 
-def test_hermes_row_key_prefix():
-    assert hermes_row_key("abc") == "hermes-todo:abc"
-    assert hermes_row_key("hermes-todo:x") == "hermes-todo:x"
+def test_hermes_row_key_is_scoped():
+    assert hermes_row_key("abc", "s1") == "hermes-todo:s1:abc"
+    assert hermes_row_key("hermes-todo:s1:x", "s1") == "hermes-todo:s1:x"
 
 
 def test_project_todo_write_sets_focus_not_running():
@@ -33,12 +33,12 @@ def test_project_todo_write_sets_focus_not_running():
         {"id": "a", "content": "Step A", "status": "in_progress"},
         {"id": "b", "content": "Step B", "status": "pending"},
     ]
-    result = project_todo_write(client, linkage, todos, merge=False)
+    result = project_todo_write(client, linkage, todos, merge=False, scope="s1")
     assert result["projected"] is True
     client.post.assert_any_call(
         "/plans/plan-1/progress-focus",
         {
-            "rowKey": "hermes-todo:a",
+            "rowKey": "hermes-todo:s1:a",
             "taskId": "task-1",
             "roleLane": "implementer",
             "executorRef": "hermes:forge",
@@ -54,7 +54,7 @@ def test_replace_todo_write_supersedes_omitted_hermes_rows():
     client = MagicMock()
     client.get.return_value = {
         "items": [
-            {"rowKey": "hermes-todo:old", "title": "Old preserved task", "status": "todo"},
+            {"rowKey": "hermes-todo:s1:old", "title": "Old preserved task", "status": "todo"},
             {"rowKey": "external:keep", "title": "Non-Hermes row", "status": "todo"},
         ]
     }
@@ -70,14 +70,15 @@ def test_replace_todo_write_supersedes_omitted_hermes_rows():
         linkage,
         [{"id": "current", "content": "Current canonical task", "status": "pending"}],
         merge=False,
+        scope="s1",
     )
 
     assert result["projected"] is True
     rows_call = [c for c in client.post.call_args_list if c.args[0] == "/plans/plan-1/progress-rows"][0]
     rows = rows_call.args[1]["rows"]
     by_key = {row["rowKey"]: row for row in rows}
-    assert by_key["hermes-todo:current"]["status"] == "todo"
-    assert by_key["hermes-todo:old"]["status"] == "partial"
+    assert by_key["hermes-todo:s1:current"]["status"] == "todo"
+    assert by_key["hermes-todo:s1:old"]["status"] == "partial"
     assert "external:keep" not in by_key
 
 
@@ -85,7 +86,7 @@ def test_replace_todo_write_batches_large_supersede_payloads():
     client = MagicMock()
     client.get.return_value = {
         "items": [
-            {"rowKey": f"hermes-todo:old-{i}", "title": f"Old {i}", "status": "todo"}
+            {"rowKey": f"hermes-todo:s1:old-{i}", "title": f"Old {i}", "status": "todo"}
             for i in range(105)
         ]
     }
@@ -96,6 +97,7 @@ def test_replace_todo_write_batches_large_supersede_payloads():
         linkage,
         [{"id": "current", "content": "Current canonical task", "status": "pending"}],
         merge=False,
+        scope="s1",
     )
 
     progress_calls = [c for c in client.post.call_args_list if c.args[0] == "/plans/plan-1/progress-rows"]
@@ -108,23 +110,23 @@ def test_running_row_without_focus_maps_to_pending():
         {"plan": {"id": "plan-1", "inProgressRowKey": None}},
         {
             "items": [
-                {"rowKey": "hermes-todo:a", "title": "Executor lease", "status": "running"},
+                {"rowKey": "hermes-todo:s1:a", "title": "Executor lease", "status": "running"},
             ]
         },
     ]
     linkage = OperatingLinkage(plan_id="plan-1", task_id=None, session_id=None, executor_ref="hermes:forge")
-    merged = reconcile_todos_from_kynver(client, linkage, [])
+    merged = reconcile_todos_from_kynver(client, linkage, [], scope="s1")
     assert merged[0]["status"] == "pending"
 
 
 def test_read_back_merges_kynver_focus():
     client = MagicMock()
     client.get.side_effect = [
-        {"plan": {"id": "plan-1", "inProgressRowKey": "hermes-todo:a"}},
+        {"plan": {"id": "plan-1", "inProgressRowKey": "hermes-todo:s1:a"}},
         {
             "items": [
-                {"rowKey": "hermes-todo:a", "title": "Step A", "status": "todo"},
-                {"rowKey": "hermes-todo:b", "title": "Step B", "status": "partial"},
+                {"rowKey": "hermes-todo:s1:a", "title": "Step A", "status": "todo"},
+                {"rowKey": "hermes-todo:s1:b", "title": "Step B", "status": "partial"},
             ]
         },
     ]
@@ -133,6 +135,7 @@ def test_read_back_merges_kynver_focus():
         client,
         linkage,
         [{"id": "b", "content": "local b", "status": "pending"}],
+        scope="s1",
     )
     by_id = {item["id"]: item for item in merged}
     assert by_id["a"]["status"] == "in_progress"
@@ -153,13 +156,14 @@ def test_operating_tools_default_on_with_credentials(monkeypatch, tmp_path):
 
 def test_safe_project_returns_blocked_without_raise():
     client = MagicMock()
-    client.get.return_value = {"items": [{"rowKey": "hermes-todo:a", "status": "running"}]}
+    client.get.return_value = {"items": [{"rowKey": "hermes-todo:s1:a", "status": "running"}]}
     linkage = OperatingLinkage(plan_id="p", task_id=None, session_id=None, executor_ref="hermes:forge")
     out = safe_project_todo_write(
         client,
         linkage,
         [{"id": "a", "content": "x", "status": "in_progress"}],
         merge=False,
+        scope="s1",
     )
     assert out.get("blocked") is True
 
@@ -177,6 +181,7 @@ def test_single_in_progress_guard():
                 {"id": "2", "status": "in_progress", "content": "b"},
             ],
             merge=False,
+            scope="s1",
         )
 
 
@@ -189,7 +194,7 @@ def test_pre_tool_call_blocks_todo_when_projection_blocked(monkeypatch):
     monkeypatch.setenv("KYNVER_PLAN_ID", "plan-1")
 
     client = MagicMock()
-    client.get.return_value = {"items": [{"rowKey": "hermes-todo:a", "status": "running"}]}
+    client.get.return_value = {"items": [{"rowKey": "hermes-todo:s1:a", "status": "running"}]}
     monkeypatch.setattr(
         "plugins.memory.kynver.operating_hooks._client",
         lambda: client,
@@ -206,6 +211,7 @@ def test_pre_tool_call_blocks_todo_when_projection_blocked(monkeypatch):
 
     block = on_pre_tool_call(
         tool_name="todo_list",
+        session_id="s1",
         args={
             "todos": [{"id": "a", "content": "Step", "status": "in_progress"}],
             "merge": False,

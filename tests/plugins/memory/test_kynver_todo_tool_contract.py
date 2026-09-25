@@ -78,7 +78,7 @@ def agentos():
 def _store(server: _FakeAgentOS, clock=lambda: 0.0) -> KynverTodoStore:
     client = KynverAgentOSClient(KynverAgentOSConfig(
         api_url=f"http://127.0.0.1:{server.server_address[1]}", api_key="test-key", slug="forge"))
-    linkage = OperatingLinkage(plan_id="plan-1", task_id="task-1", session_id=None, executor_ref="hermes:forge")
+    linkage = OperatingLinkage(plan_id="plan-1", task_id="task-1", session_id="s1", executor_ref="hermes:forge")
     return KynverTodoStore(client, linkage=linkage, retry_interval_seconds=10, clock=clock)
 
 
@@ -96,11 +96,11 @@ def test_todo_tool_read_write_merge_and_restore_through_kynver(agentos):
 
     written = _call(store, todos=[{"id": "a", "content": "Step A", "status": "in_progress"},
                                   {"id": "b", "content": "Step B", "status": "pending"}])
-    assert agentos.rows["hermes-todo:a"]["status"] == "in_progress"
+    assert agentos.rows["hermes-todo:s1:a"]["status"] == "in_progress"
     merged = _call(store, todos=[{"id": "a", "status": "completed"}], merge=True)
     assert {i["id"]: (i["content"], i["status"]) for i in merged["todos"]} == {
         "a": ("Step A", "completed"), "b": ("Step B", "pending")}
-    assert agentos.rows["hermes-todo:a"]["status"] == "partial"
+    assert agentos.rows["hermes-todo:s1:a"]["status"] == "partial"
     assert merged["revision"] > written["revision"] > 0
     assert _call(store)["revision"] == merged["revision"]  # a read of unchanged state is not a write
 
@@ -129,7 +129,7 @@ def test_revision_stays_monotonic_through_degraded_and_recovery(agentos):
     now[0] = 10.0
     recovered = _call(store)
     assert not store.degraded
-    assert agentos.rows["hermes-todo:a"]["title"] == "offline edit"
+    assert agentos.rows["hermes-todo:s1:a"]["title"] == "offline edit"
     revisions.append(recovered["revision"])
     revisions.append(_call(store, todos=[{"id": "a", "status": "completed"}], merge=True)["revision"])
 

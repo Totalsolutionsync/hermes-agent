@@ -12,6 +12,7 @@ from typing import Any, Optional
 from .agentos_bridge import KynverAgentOSClient, agentos_enabled, load_kynver_agentos_config
 from .operating_config import kynver_operating_tools_enabled, load_operating_linkage
 from .plan_progress import inspect_todo_write
+from .integration import known_session_scope
 from .pre_transition import TODO_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ def _client() -> KynverAgentOSClient | None:
 def on_pre_tool_call(
     tool_name: str = "",
     args: Any = None,
+    session_id: str = "",
     **_: Any,
 ) -> Optional[dict[str, Any]]:
     if tool_name not in TODO_TOOL_NAMES:
@@ -49,6 +51,7 @@ def on_pre_tool_call(
         linkage,
         list(todos),
         merge=bool(args.get("merge")),
+        scope=known_session_scope(session_id),
     )
     if blocked:
         return {

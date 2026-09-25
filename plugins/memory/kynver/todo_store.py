@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional
+import uuid
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from tools.todo_tool import BaseTodoStore, TodoStore
 
@@ -15,9 +16,11 @@ from .plan_progress import (
     project_todo_write,
     reconcile_todos_from_kynver,
 )
-from .pre_transition import PreTransitionError
+from .pre_transition import PreTransitionError, normalize_todo_scope
 
 logger = logging.getLogger(__name__)
+
+ScopeSource = Union[str, Callable[[], Optional[str]], None]
 
 
 class KynverTodoStore(BaseTodoStore):
@@ -25,7 +28,12 @@ class KynverTodoStore(BaseTodoStore):
 
     The revision belongs to the store, not to whichever backend answered: it bumps whenever
     the list handed back by read()/write() changes, so it stays monotonic across degraded
-    fallback, recovery replay and read-back of rows edited elsewhere."""
+    fallback, recovery replay and read-back of rows edited elsewhere.
+
+    Every session shares one AgentOS plan, so rows are keyed ``hermes-todo:<scope>:<id>`` and
+    only the current scope is read back. ``scope`` is a string or a resolver called per
+    operation (the agent's compression-lineage root, see ``integration.session_todo_scope``);
+    without one it falls back to the linkage session id, then to a per-store id."""
 
     def __init__(
         self,
@@ -36,6 +44,7 @@ class KynverTodoStore(BaseTodoStore):
         degraded: bool = False,
         retry_interval_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
+        scope: ScopeSource = None,
     ):
         self._client = client
         self._linkage = linkage or load_operating_linkage()
@@ -44,10 +53,24 @@ class KynverTodoStore(BaseTodoStore):
         self._retry_interval_seconds = max(0.0, retry_interval_seconds)
         self._clock = clock
         self._degraded_at = self._clock() if degraded else None
-        self._pending_writes: List[tuple[List[Dict[str, Any]], bool]] = []
+        self._pending_writes: List[tuple[str, List[Dict[str, Any]], bool]] = []
         self._local = TodoStore()
         self._last_items: List[Dict[str, str]] = []
         self._revision = 0
+        self._scope_source = scope
+        self._fallback_scope = f"local-{uuid.uuid4().hex[:12]}"
+        self._active_scope: Optional[str] = None
+
+    def _current_scope(self) -> str:
+        """Resolve the session scope; a changed scope starts from an empty local cache so one
+        session's items never leak into another's list."""
+        source = self._scope_source
+        raw = source() if callable(source) else source
+        scope = normalize_todo_scope(raw or self._linkage.session_id or self._fallback_scope)
+        if self._active_scope is not None and scope != self._active_scope:
+            self._local = TodoStore()
+        self._active_scope = scope
+        return scope
 
     @property
     def degraded(self) -> bool:
@@ -72,13 +95,14 @@ class KynverTodoStore(BaseTodoStore):
             return None
         try:
             while self._pending_writes:
-                pending_todos, pending_merge = self._pending_writes[0]
+                pending_scope, pending_todos, pending_merge = self._pending_writes[0]
                 try:
                     blocked = inspect_todo_write(
                         self._client,
                         self._linkage,
                         pending_todos,
                         merge=pending_merge,
+                        scope=pending_scope,
                     )
                     if blocked:
                         raise PreTransitionError(blocked)
@@ -87,6 +111,7 @@ class KynverTodoStore(BaseTodoStore):
                         self._linkage,
                         pending_todos,
                         merge=pending_merge,
+                        scope=pending_scope,
                     )
                 except PreTransitionError as exc:
                     self._pending_writes.pop(0)
@@ -101,6 +126,7 @@ class KynverTodoStore(BaseTodoStore):
                 self._client,
                 self._linkage,
                 local_items,
+                scope=self._current_scope(),
             )
         except Exception as exc:
             self._mark_degraded(str(exc))
@@ -130,12 +156,14 @@ class KynverTodoStore(BaseTodoStore):
     def restore(self, todos: List[Dict[str, Any]], *, revision: Any = 0) -> List[Dict[str, str]]:
         """Seed the local cache from a trusted snapshot (history hydration). Nothing is
         projected to AgentOS: replaying history must not rewrite plan rows."""
+        self._current_scope()
         items = self._local.restore(todos, revision=revision)
         self._revision = self._local.snapshot()["revision"]
         self._last_items = [dict(item) for item in items]
         return items
 
     def _read_items(self) -> List[Dict[str, str]]:
+        scope = self._current_scope()
         if self._degraded:
             recovered = self._try_recover()
             if recovered is not None:
@@ -148,6 +176,7 @@ class KynverTodoStore(BaseTodoStore):
                 self._client,
                 self._linkage,
                 self._local.read(),
+                scope=scope,
             )
         except KynverAgentOSError as exc:
             if not self._allow_fallback:
@@ -161,8 +190,9 @@ class KynverTodoStore(BaseTodoStore):
             return self._local.read()
 
     def _write_items(self, todos: List[Dict[str, Any]], merge: bool) -> List[Dict[str, str]]:
+        scope = self._current_scope()
         local_items = self._local.write(todos, merge=merge)
-        write_batch = ([dict(item) for item in todos], merge)
+        write_batch = (scope, [dict(item) for item in todos], merge)
 
         if self._degraded:
             self._pending_writes.append(write_batch)
@@ -180,6 +210,7 @@ class KynverTodoStore(BaseTodoStore):
                 self._linkage,
                 list(todos),
                 merge=merge,
+                scope=scope,
             )
             if blocked:
                 raise PreTransitionError(blocked)
@@ -189,6 +220,7 @@ class KynverTodoStore(BaseTodoStore):
                 self._linkage,
                 list(todos),
                 merge=merge,
+                scope=scope,
             )
             return self._read_items()
         except PreTransitionError:
