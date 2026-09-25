@@ -6,7 +6,7 @@ import logging
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from tools.todo_tool import TodoStore
+from tools.todo_tool import BaseTodoStore, TodoStore
 
 from .agentos_bridge import KynverAgentOSClient, KynverAgentOSError
 from .operating_config import OperatingLinkage, load_operating_linkage
@@ -20,8 +20,12 @@ from .pre_transition import PreTransitionError
 logger = logging.getLogger(__name__)
 
 
-class KynverTodoStore:
-    """TodoStore that projects to Kynver plan progress; falls back to local on failure."""
+class KynverTodoStore(BaseTodoStore):
+    """TodoStore that projects to Kynver plan progress; falls back to local on failure.
+
+    The revision belongs to the store, not to whichever backend answered: it bumps whenever
+    the list handed back by read()/write() changes, so it stays monotonic across degraded
+    fallback, recovery replay and read-back of rows edited elsewhere."""
 
     def __init__(
         self,
@@ -42,6 +46,8 @@ class KynverTodoStore:
         self._degraded_at = self._clock() if degraded else None
         self._pending_writes: List[tuple[List[Dict[str, Any]], bool]] = []
         self._local = TodoStore()
+        self._last_items: List[Dict[str, str]] = []
+        self._revision = 0
 
     @property
     def degraded(self) -> bool:
@@ -104,7 +110,32 @@ class KynverTodoStore:
         logger.info("Kynver todo store recovered; AgentOS plan progress is available")
         return items
 
+    def _publish(self, items: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        if items != self._last_items:
+            self._revision += 1
+            self._last_items = [dict(item) for item in items]
+        return items
+
     def read(self) -> List[Dict[str, str]]:
+        return self._publish(self._read_items())
+
+    def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
+        return self._publish(self._write_items(todos, merge))
+
+    def snapshot(self) -> Dict[str, Any]:
+        """State as of the last read/write/restore — no AgentOS round trip, so todo_tool and
+        the TUI can pair it with the list they just got."""
+        return {"todos": [dict(item) for item in self._last_items], "revision": self._revision}
+
+    def restore(self, todos: List[Dict[str, Any]], *, revision: Any = 0) -> List[Dict[str, str]]:
+        """Seed the local cache from a trusted snapshot (history hydration). Nothing is
+        projected to AgentOS: replaying history must not rewrite plan rows."""
+        items = self._local.restore(todos, revision=revision)
+        self._revision = self._local.snapshot()["revision"]
+        self._last_items = [dict(item) for item in items]
+        return items
+
+    def _read_items(self) -> List[Dict[str, str]]:
         if self._degraded:
             recovered = self._try_recover()
             if recovered is not None:
@@ -129,7 +160,7 @@ class KynverTodoStore:
             self._mark_degraded(str(exc))
             return self._local.read()
 
-    def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
+    def _write_items(self, todos: List[Dict[str, Any]], merge: bool) -> List[Dict[str, str]]:
         local_items = self._local.write(todos, merge=merge)
         write_batch = ([dict(item) for item in todos], merge)
 
@@ -159,7 +190,7 @@ class KynverTodoStore:
                 list(todos),
                 merge=merge,
             )
-            return self.read()
+            return self._read_items()
         except PreTransitionError:
             raise
         except KynverAgentOSError as exc:

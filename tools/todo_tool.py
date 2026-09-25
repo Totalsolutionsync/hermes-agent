@@ -4,6 +4,7 @@ a monotonic revision so UI clients can reject stale updates. One ``todo_list`` t
 ``todos`` to write, omit to read; every call returns the full list. No system-prompt mutation."""
 
 import json
+from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
@@ -23,7 +24,34 @@ _STATUS_MARKERS = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "
 _ACTIVE_STATUSES = {"pending", "in_progress"}
 
 
-class TodoStore:
+class BaseTodoStore(ABC):
+    """Contract for a session todo store (``agent._todo_store``). ``todo_tool``, history
+    hydration (``AIAgent._hydrate_todo_store``) and the TUI ``todo_state`` all call these, and
+    plugins may swap the store in (``agent/todo_store_provider.py``) — subclassing turns a
+    missing method into a TypeError at construction instead of an AttributeError mid-turn."""
+
+    @abstractmethod
+    def read(self) -> List[Dict[str, str]]: ...
+
+    @abstractmethod
+    def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]: ...
+
+    @abstractmethod
+    def has_items(self) -> bool: ...
+
+    @abstractmethod
+    def snapshot(self) -> Dict[str, Any]:
+        """``{"todos": [...], "revision": int}``; revision is monotonic across writes."""
+
+    @abstractmethod
+    def restore(self, todos: List[Dict[str, Any]], *, revision: Any = 0) -> List[Dict[str, str]]:
+        """Adopt a trusted snapshot without manufacturing a new revision."""
+
+    @abstractmethod
+    def format_for_injection(self) -> Optional[str]: ...
+
+
+class TodoStore(BaseTodoStore):
     """In-memory todo list, one per AIAgent. List position is priority; items are
     ``{id, content, status, parent?}`` — ``parent`` nests a subtask."""
 
@@ -189,7 +217,7 @@ class TodoStore:
 
 
 def todo_tool(todos: Optional[List[Dict[str, Any]]] = None, merge: bool = False,
-              store: Optional[TodoStore] = None) -> str:
+              store: Optional[BaseTodoStore] = None) -> str:
     """Write ``todos`` (replace, or ``merge`` by id) or read when None -> list + summary JSON."""
     if store is None:
         return tool_error("TodoStore not initialized")

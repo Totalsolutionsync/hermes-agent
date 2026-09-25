@@ -109,6 +109,9 @@ def project_todo_write(
 
     upserts: list[dict[str, Any]] = []
     requested_row_keys: set[str] = set()
+    # A merge that moves the focused row off in_progress must release focus, or read-back
+    # (which trusts inProgressRowKey) flips the item straight back to in_progress.
+    releases_focus = False
     for item in todos:
         todo_id = str(item.get("id") or "").strip()
         if not todo_id:
@@ -117,10 +120,13 @@ def project_todo_write(
         requested_row_keys.add(row_key)
         status = normalize_hermes_status(str(item.get("status", "")))
         existing = by_key.get(row_key)
+        if existing and existing.get("status") == "in_progress" and status != "in_progress":
+            releases_focus = True
         upserts.append(
             {
                 "rowKey": row_key,
-                "title": str(item.get("content") or todo_id)[:500],
+                # Status-only merges omit content; keep the row's title rather than the bare id.
+                "title": str(item.get("content") or (existing or {}).get("title") or todo_id)[:500],
                 "status": _STATUS_TO_ROW.get(status, "todo"),
                 "taskId": linkage.task_id,
             }
@@ -160,7 +166,7 @@ def project_todo_write(
                 "note": f"Hermes todo focus: {focus.get('content', '')}"[:500],
             },
         )
-    elif not merge:
+    elif not merge or releases_focus:
         client.post(
             f"{plan_path}/progress-focus",
             {
