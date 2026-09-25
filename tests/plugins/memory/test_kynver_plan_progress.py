@@ -195,6 +195,9 @@ def test_pre_tool_call_blocks_todo_when_projection_blocked(monkeypatch):
 
     client = MagicMock()
     client.get.return_value = {"items": [{"rowKey": "hermes-todo:s1:a", "status": "running"}]}
+    # The session's todo plan comes from Kynver's per-session binding.
+    client.post.return_value = {"planId": "plan-bound", "source": "task", "bound": True}
+    monkeypatch.setattr("plugins.memory.kynver.plan_binding._SHARED", {})
     monkeypatch.setattr(
         "plugins.memory.kynver.operating_hooks._client",
         lambda: client,
@@ -223,3 +226,4 @@ def test_pre_tool_call_blocks_todo_when_projection_blocked(monkeypatch):
         "message": block["message"],
     }
     assert "running" in block["message"] or "lease" in block["message"]
+    client.get.assert_called_with("/plans/plan-bound/progress-rows")

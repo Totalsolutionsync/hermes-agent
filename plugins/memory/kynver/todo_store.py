@@ -11,6 +11,7 @@ from tools.todo_tool import BaseTodoStore, TodoStore
 
 from .agentos_bridge import KynverAgentOSClient, KynverAgentOSError
 from .operating_config import OperatingLinkage, load_operating_linkage
+from .plan_binding import TodoPlanResolver
 from .plan_progress import (
     inspect_todo_write,
     project_todo_write,
@@ -30,10 +31,14 @@ class KynverTodoStore(BaseTodoStore):
     the list handed back by read()/write() changes, so it stays monotonic across degraded
     fallback, recovery replay and read-back of rows edited elsewhere.
 
-    Every session shares one AgentOS plan, so rows are keyed ``hermes-todo:<scope>:<id>`` and
-    only the current scope is read back. ``scope`` is a string or a resolver called per
-    operation (the agent's compression-lineage root, see ``integration.session_todo_scope``);
-    without one it falls back to the linkage session id, then to a per-store id."""
+    Rows are keyed ``hermes-todo:<scope>:<id>`` and only the current scope is read back.
+    ``scope`` is a string or a resolver called per operation (the agent's compression-lineage
+    root, see ``integration.session_todo_scope``); without one it falls back to the linkage
+    session id, then to a per-store id.
+
+    With a ``plan_resolver`` each scope's rows go to the plan Kynver binds that session to
+    (``plan_binding.TodoPlanResolver``); without one, to the fixed ``linkage.plan_id``
+    (legacy ``KYNVER_PLAN_ID``)."""
 
     def __init__(
         self,
@@ -45,6 +50,7 @@ class KynverTodoStore(BaseTodoStore):
         retry_interval_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
         scope: ScopeSource = None,
+        plan_resolver: Optional[TodoPlanResolver] = None,
     ):
         self._client = client
         self._linkage = linkage or load_operating_linkage()
@@ -60,6 +66,20 @@ class KynverTodoStore(BaseTodoStore):
         self._scope_source = scope
         self._fallback_scope = f"local-{uuid.uuid4().hex[:12]}"
         self._active_scope: Optional[str] = None
+        self._plan_resolver = plan_resolver
+
+    def _can_project(self) -> bool:
+        return self._plan_resolver is not None or bool(self._linkage.plan_id)
+
+    def _linkage_for(self, scope: str) -> OperatingLinkage:
+        """Linkage whose ``plan_id`` is ``scope``'s todo plan. May raise KynverAgentOSError."""
+        if self._plan_resolver is None:
+            return self._linkage
+        return self._plan_resolver.linkage_for(scope)
+
+    def plan_for_current_scope(self) -> Optional[str]:
+        """Plan id the current session's todos land on (None when local-only)."""
+        return self._linkage_for(self._current_scope()).plan_id
 
     def _current_scope(self) -> str:
         """Resolve the session scope; a changed scope starts from an empty local cache so one
@@ -91,15 +111,20 @@ class KynverTodoStore(BaseTodoStore):
     def _try_recover(self) -> Optional[List[Dict[str, str]]]:
         """Retry a read after the cooldown and clear transient degradation."""
 
-        if not self._recovery_due() or not self._linkage.plan_id:
+        if not self._recovery_due() or not self._can_project():
             return None
         try:
             while self._pending_writes:
                 pending_scope, pending_todos, pending_merge = self._pending_writes[0]
+                # Replayed against the plan of the scope it was written in.
+                pending_linkage = self._linkage_for(pending_scope)
+                if not pending_linkage.plan_id:
+                    self._pending_writes.pop(0)
+                    continue
                 try:
                     blocked = inspect_todo_write(
                         self._client,
-                        self._linkage,
+                        pending_linkage,
                         pending_todos,
                         merge=pending_merge,
                         scope=pending_scope,
@@ -108,7 +133,7 @@ class KynverTodoStore(BaseTodoStore):
                         raise PreTransitionError(blocked)
                     project_todo_write(
                         self._client,
-                        self._linkage,
+                        pending_linkage,
                         pending_todos,
                         merge=pending_merge,
                         scope=pending_scope,
@@ -122,11 +147,12 @@ class KynverTodoStore(BaseTodoStore):
                     continue
                 self._pending_writes.pop(0)
             local_items = self._local.read()
-            items = reconcile_todos_from_kynver(
-                self._client,
-                self._linkage,
-                local_items,
-                scope=self._current_scope(),
+            scope = self._current_scope()
+            linkage = self._linkage_for(scope)
+            items = (
+                reconcile_todos_from_kynver(self._client, linkage, local_items, scope=scope)
+                if linkage.plan_id
+                else local_items
             )
         except Exception as exc:
             self._mark_degraded(str(exc))
@@ -169,12 +195,15 @@ class KynverTodoStore(BaseTodoStore):
             if recovered is not None:
                 return recovered
             return self._local.read()
-        if not self._linkage.plan_id:
+        if not self._can_project():
             return self._local.read()
         try:
+            linkage = self._linkage_for(scope)
+            if not linkage.plan_id:
+                return self._local.read()
             return reconcile_todos_from_kynver(
                 self._client,
-                self._linkage,
+                linkage,
                 self._local.read(),
                 scope=scope,
             )
@@ -201,13 +230,16 @@ class KynverTodoStore(BaseTodoStore):
                 return local_items
             if recovered is not None:
                 return recovered
-        if not self._linkage.plan_id:
+        if not self._can_project():
             return local_items
 
         try:
+            linkage = self._linkage_for(scope)
+            if not linkage.plan_id:
+                return local_items
             blocked = inspect_todo_write(
                 self._client,
-                self._linkage,
+                linkage,
                 list(todos),
                 merge=merge,
                 scope=scope,
@@ -217,7 +249,7 @@ class KynverTodoStore(BaseTodoStore):
 
             project_todo_write(
                 self._client,
-                self._linkage,
+                linkage,
                 list(todos),
                 merge=merge,
                 scope=scope,

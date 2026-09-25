@@ -10,6 +10,7 @@ from agent.operating_prompt import register_operating_prompt_hook
 
 from .agentos_bridge import KynverAgentOSClient
 from .operating_config import load_operating_linkage
+from .plan_binding import plan_binding_enabled, shared_plan_resolver
 from .pre_transition import normalize_todo_scope
 from .substrate import allow_local_fallback, substrate_active
 from .todo_store import KynverTodoStore
@@ -102,13 +103,16 @@ def configure_agent(
         linkage=linkage,
         allow_fallback=fallback_ok,
         scope=lambda: session_todo_scope(agent),
+        plan_resolver=shared_plan_resolver(client, linkage),
     )
     agent._todo_store_provider = "kynver"
     agent._kynver_degraded = bool(getattr(agent._todo_store, "degraded", False))
 
     logger.info(
-        "Kynver todo store active (plan_id=%s; in_progress uses progress-focus, not running)",
-        linkage.plan_id or "(none)",
+        "Kynver todo store active (plan: %s; in_progress uses progress-focus, not running)",
+        "per-session binding" + (f", legacy fallback {linkage.plan_id}" if linkage.plan_id else "")
+        if plan_binding_enabled()
+        else f"fixed {linkage.plan_id or '(none)'}",
     )
 
 

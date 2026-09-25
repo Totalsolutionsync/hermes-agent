@@ -35,7 +35,17 @@ such as `todo`, `memory`, `delegate_task`, and `session_search`. Kynver uses it
 to mirror todo state and audit tool events without adding Kynver-specific code
 to those tools.
 
-When `KYNVER_PLAN_ID` is set, Forge also registers plugin hooks on `todo`:
+Each session's todo list lands on the AgentOS plan its work belongs to. The todo
+store resolves the plan per session through `POST /api/agent-os/{slug}/todos/plan-binding`
+(`sessionKey = hermes:<compression-lineage root>`, hint `taskId = KYNVER_TASK_ID`).
+Kynver persists the binding and uses this order: explicit bind → session binding → the
+task's plan → the workspace Inbox plan. Compression and restarts keep the same plan. Rows
+are keyed `hermes-todo:<scope>:<id>`. `KYNVER_PLAN_ID` is only a legacy fallback: it is
+used when the binding route does not exist (an older Kynver answers 404/405) or when
+`KYNVER_TODO_PLAN_BINDING=off`. Transient binding failures degrade to the local todo
+cache and retry, so they never redirect rows to the legacy plan.
+
+Forge also registers plugin hooks on `todo`:
 
 - `pre_tool_call` — project Hermes todos to `/plans/:id/progress-rows` and
   `/progress-focus` (`in_progress` focus ≠ harness executor lease `running`).
