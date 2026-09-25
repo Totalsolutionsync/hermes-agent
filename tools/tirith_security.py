@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -581,6 +582,11 @@ def check_command_security(command: str) -> dict:
     if action == "warn" and findings and all(_is_emoji_variation_selector_finding(f) for f in findings) \
             and _has_only_emoji_presentation_selectors(command):
         return _verdict("allow")
+    # Tirith's dotfile_overwrite fires on ANY redirect under ~/.<dir>, including Hermes's own scratch
+    # dirs (`cat >> ~/.hermes/cache/scratch/x.md`), which put routine writes behind an approval prompt.
+    # Drop it only when every home-dot path in the command resolves inside those dirs.
+    if action in ("warn", "block") and findings and _is_hermes_scratch_dotfile_write(findings, command):
+        return _verdict("allow")
     return _verdict(action, summary, findings)
 
 
@@ -612,3 +618,29 @@ def _has_only_emoji_presentation_selectors(command: str) -> bool:
         if not any(start <= base <= end for start, end in _EMOJI_PRESENTATION_BASE_RANGES):
             return False
     return saw_selector
+
+
+_HOME_DOT_PATH_RE = re.compile(r'(?:~|\$HOME|\$\{HOME\})/(\.[^\s;&|<>()\'"`]*)')
+_HERMES_SCRATCH_SUBDIRS = ("cache", "artifacts")
+
+
+def _is_hermes_scratch_dotfile_write(findings: list, command: str) -> bool:
+    """True when every finding is dotfile_overwrite and every ``~/.``-path lands in Hermes scratch dirs.
+
+    Paths resolve through ``realpath`` so ``..`` and symlinks cannot escape; unexpanded
+    shell syntax (``$VAR``, globs, braces) is never trusted. Config, secrets, plugins and
+    the install itself stay outside the allowed dirs, so writes there still prompt."""
+    if not all(isinstance(f, dict) and f.get("rule_id") == "dotfile_overwrite" for f in findings):
+        return False
+    rel_paths = _HOME_DOT_PATH_RE.findall(command)
+    if not rel_paths:
+        return False
+    home = os.path.expanduser("~")
+    roots = [os.path.realpath(get_hermes_home() / sub) for sub in _HERMES_SCRATCH_SUBDIRS]
+    for rel in rel_paths:
+        if any(ch in rel for ch in "$*?[{"):
+            return False
+        resolved = os.path.realpath(os.path.join(home, rel))
+        if not any(resolved.startswith(root + os.sep) for root in roots):
+            return False
+    return True

@@ -796,3 +796,64 @@ class TestMkdtempOSErrorNoSpace:
             _install_tirith(log_failures=False)
         after = set(glob.glob("/tmp/tirith-install-*"))
         assert after - before == set()
+
+
+# ---------------------------------------------------------------------------
+# dotfile_overwrite on Hermes scratch dirs
+# ---------------------------------------------------------------------------
+
+_DOTFILE_FINDING = {"rule_id": "dotfile_overwrite", "severity": "HIGH", "title": "Dotfile overwrite detected"}
+_CFG = {"tirith_enabled": True, "tirith_path": "tirith", "tirith_timeout": 5, "tirith_fail_open": True}
+
+
+@pytest.fixture
+def _home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".hermes" / "cache").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    return home
+
+
+class TestHermesScratchDotfileWrites:
+    """Tirith flags any redirect under ~/.<dir>; writes into Hermes scratch dirs are not shell-config overwrites."""
+
+    @pytest.mark.parametrize("command", [
+        "cat >> ~/.hermes/cache/scratch/x.md",
+        "echo done > ~/.hermes/artifacts/report.md && echo ok >> $HOME/.hermes/cache/log.txt",
+    ])
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config", return_value=_CFG)
+    def test_scratch_write_is_allowed(self, _cfg, mock_run, _home, command):
+        mock_run.return_value = _mock_run(1, _json_stdout([_DOTFILE_FINDING]))
+        assert check_command_security(command)["action"] == "allow"
+
+    @pytest.mark.parametrize("command", [
+        "echo x >> ~/.bashrc",
+        "echo x > ~/.hermes/config.yaml",
+        "echo x > ~/.hermes/.env",
+        "echo x >> ~/.ssh/authorized_keys",
+        "echo x > ~/.local/bin/evil",
+        "echo x > ~/.hermes/cache/../config.yaml",
+        "echo a > ~/.hermes/cache/x; echo b >> ~/.profile",
+        "echo x > ~/.hermes/cache/$NAME/../../.env",
+    ])
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config", return_value=_CFG)
+    def test_real_config_and_secret_targets_still_block(self, _cfg, mock_run, _home, command):
+        mock_run.return_value = _mock_run(1, _json_stdout([_DOTFILE_FINDING]))
+        assert check_command_security(command)["action"] == "block"
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config", return_value=_CFG)
+    def test_symlink_out_of_scratch_still_blocks(self, _cfg, mock_run, _home):
+        (_home / ".hermes" / "cache" / "rc").symlink_to(_home / ".bashrc")
+        mock_run.return_value = _mock_run(1, _json_stdout([_DOTFILE_FINDING]))
+        assert check_command_security("echo x >> ~/.hermes/cache/rc")["action"] == "block"
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config", return_value=_CFG)
+    def test_other_findings_keep_the_verdict(self, _cfg, mock_run, _home):
+        findings = [_DOTFILE_FINDING, {"rule_id": "pipe_to_interpreter", "severity": "HIGH"}]
+        mock_run.return_value = _mock_run(1, _json_stdout(findings))
+        assert check_command_security("curl x | sh > ~/.hermes/cache/out")["action"] == "block"
