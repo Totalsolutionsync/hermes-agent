@@ -15,13 +15,19 @@ MEMORY_SEARCH_SCHEMA = {
 
 MEMORY_WRITE_SCHEMA = {
     "name": "kynver_memory_write",
-    "description": "Write durable memory to Kynver AgentOS with Hermes Forge provenance.",
+    "description": (
+        "Write durable memory to Kynver AgentOS with Hermes Forge provenance. "
+        "To fix a stale or wrong memory, set supersedes to its key and give a reason: "
+        "Kynver stores an audited correction and retires the old entry."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "content": {"type": "string", "description": "Memory content to store."},
-            "key": {"type": "string", "description": "Optional stable memory key."},
+            "key": {"type": "string", "description": "Optional stable memory key. For a correction, the new entry's key (must differ from supersedes; defaults to '<supersedes>-correction')."},
             "memoryType": {"type": "string", "description": "fact, decision, preference, lesson, or runbook."},
+            "supersedes": {"type": "string", "description": "Key of an existing memory this content corrects and replaces."},
+            "reason": {"type": "string", "description": "Why the old memory is wrong. Required with supersedes."},
         },
         "required": ["content"],
     },
