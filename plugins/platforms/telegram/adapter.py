@@ -4769,7 +4769,8 @@ class TelegramAdapter(BasePlatformAdapter):
             edit_text = f"{label} by {user_display}"
         else:
             label = "⌛ Approval expired"
-            edit_text = f"{label} — no command was waiting. It already timed out (and was denied) or was resolved elsewhere."
+            edit_text = (f"{label} — no command was waiting. It already timed out (and was NOT run) or was resolved "
+                         "elsewhere. Reply /retry to run it again.")
         await query.answer(text=label)
         await self._edit_md_quiet(query, edit_text)
         # Typing was paused when the approval was sent; the text /approve and /deny paths resume it too.

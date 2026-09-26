@@ -14,10 +14,12 @@ from tools.registry import tool_error
 from .agentos_bridge import (
     KynverAgentOSClient,
     KynverAgentOSConfig,
+    KynverAgentOSError,
     agentos_enabled,
     redact,
 )
 from .contract import (
+    MEMORY_CORRECT_PATH,
     MEMORY_WRITE_PATH,
     SESSION_OPEN_PATH,
     SKILL_LIST_PATH,
@@ -251,6 +253,11 @@ def _filter_skill_items(items: list[dict[str, Any]], query: str, limit: int) -> 
         if needle in haystack:
             matches.append(item)
     return matches[:limit]
+
+
+def _is_memory_conflict(exc: Exception) -> bool:
+    """Kynver's slug-idempotency conflict: same key, different content (HTTP 409)."""
+    return getattr(exc, "status", None) == 409 or "conflicts with existing state" in str(exc)
 
 
 def _first_threat(content: str) -> Optional[str]:
@@ -969,14 +976,97 @@ class KynverMemoryProvider(MemoryProvider):
         memories = _coerce_items(payload)[:k]
         return _json_result({"success": True, "memories": memories, "count": len(memories), "sourceId": SOURCE_ID})
 
-    def _handle_memory_write(self, args: Dict[str, Any]) -> str:
-        result = self._write_memory(
-            str(args.get("content") or ""),
-            key=str(args.get("key") or "").strip(),
-            memory_type=str(args.get("memoryType") or "fact").strip() or "fact",
-            metadata={"tool": "kynver_memory_write"},
-            timeout=self._client_timeout,
+    def _correct_memory(
+        self,
+        content: str,
+        *,
+        target_key: str,
+        reason: str,
+        key: str = "",
+        memory_type: str = "",
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Supersede ``target_key`` through Kynver's audited ``/memory/correct`` route.
+
+        A stable key is an idempotency key on ``/memory``, so changed content under an
+        existing key is a conflict by design; correction is the explicit edit path."""
+        if self._observe_only:
+            raise RuntimeError("Kynver AgentOS is in observe mode; durable memory writes are disabled")
+        clean = (content or "").strip()
+        if not clean:
+            raise ValueError("content is required")
+        threat = _first_threat(clean)
+        if threat:
+            raise ValueError(threat)
+        body = _compact_dict(
+            {
+                "targetSlug": target_key,
+                "content": clean,
+                "reason": reason,
+                "key": key or None,
+                "memoryType": memory_type or None,
+                "sourceId": SOURCE_ID,
+                "assertedBySessionId": self._agentos_session_id or None,
+            }
         )
+        payload = self._require_client().post(
+            MEMORY_CORRECT_PATH,
+            body,
+            timeout=timeout or self._client_timeout,
+        )
+        self._mark_success("memory.correct")
+        return payload
+
+    def _handle_memory_write(self, args: Dict[str, Any]) -> str:
+        content = str(args.get("content") or "")
+        key = str(args.get("key") or "").strip()
+        memory_type = str(args.get("memoryType") or "").strip()
+        supersedes = str(args.get("supersedes") or "").strip()
+        if supersedes:
+            reason = str(args.get("reason") or "").strip()
+            if not reason:
+                return tool_error("reason is required when supersedes is set: say why the old memory is wrong")
+            if key == supersedes:
+                return tool_error(
+                    "key must differ from supersedes: the correction is a new entry that retires the old one. "
+                    "Omit key to use '<supersedes>-correction'."
+                )
+            try:
+                result = self._correct_memory(
+                    content,
+                    target_key=supersedes,
+                    reason=reason,
+                    key=key,
+                    memory_type=memory_type,
+                )
+            except KynverAgentOSError as exc:
+                if not _is_memory_conflict(exc):
+                    raise
+                new_key = key or f"{supersedes}-correction"
+                return tool_error(
+                    f"a memory with key '{new_key}' already exists with different content. "
+                    f"If it is the entry to fix, call kynver_memory_write with supersedes='{new_key}' "
+                    "and a reason; otherwise pass a new key."
+                )
+            return _json_result(
+                {"success": True, "corrected": supersedes, "result": result, "sourceId": SOURCE_ID}
+            )
+        try:
+            result = self._write_memory(
+                content,
+                key=key,
+                memory_type=memory_type or "fact",
+                metadata={"tool": "kynver_memory_write"},
+                timeout=self._client_timeout,
+            )
+        except KynverAgentOSError as exc:
+            if not (key and _is_memory_conflict(exc)):
+                raise
+            return tool_error(
+                f"a memory with key '{key}' already exists with different content; to replace it, "
+                f"call kynver_memory_write with supersedes='{key}' and a reason (the old entry is "
+                "retired with an audit record). Do not write a duplicate under a new key."
+            )
         return _json_result({"success": True, "result": result, "sourceId": SOURCE_ID})
 
     def _handle_task_create(self, args: Dict[str, Any]) -> str:

@@ -31,6 +31,10 @@ _VALID_MEMORY_WRITE_MODES = frozenset({"off", "mirror", _DEFAULT_MEMORY_WRITE_MO
 class KynverAgentOSError(RuntimeError):
     """Raised for redacted, user-safe Kynver AgentOS failures."""
 
+    def __init__(self, message: str, *, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
 
 @dataclass(frozen=True)
 class KynverAgentOSConfig:
@@ -222,7 +226,9 @@ class KynverAgentOSClient:
                 payload = res.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
-            raise KynverAgentOSError(redact(f"Kynver AgentOS HTTP {exc.code}: {detail}")) from exc
+            raise KynverAgentOSError(
+                redact(f"Kynver AgentOS HTTP {exc.code}: {detail}"), status=exc.code
+            ) from exc
         except Exception as exc:
             raise KynverAgentOSError(redact(f"Kynver AgentOS request failed: {exc}")) from exc
         if not payload:
