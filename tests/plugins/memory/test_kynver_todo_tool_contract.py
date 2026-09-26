@@ -29,6 +29,14 @@ class _FakeAgentOS(ThreadingHTTPServer):
         self.writes = 0
 
 
+def _prefix_filter(query: str, rows):
+    """Server-side ``?rowKeyPrefix=`` narrowing of GET progress-rows."""
+    from urllib.parse import parse_qs
+
+    prefix = (parse_qs(query).get("rowKeyPrefix") or [""])[0]
+    return [dict(r) for r in rows if str(r.get("rowKey", "")).startswith(prefix)]
+
+
 class _Handler(BaseHTTPRequestHandler):
     server: _FakeAgentOS
 
@@ -46,8 +54,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.server.down:
             return self._reply(503, {"error": "unavailable"})
-        if self.path == f"{_PLAN}/progress-rows":
-            return self._reply(200, {"items": list(self.server.rows.values())})
+        path, _, query = self.path.partition("?")
+        if path == f"{_PLAN}/progress-rows":
+            return self._reply(200, {"items": _prefix_filter(query, self.server.rows.values())})
         if self.path == _PLAN:
             return self._reply(200, {"plan": {"id": "plan-1", "inProgressRowKey": self.server.focus_key}})
         self._reply(404, {"error": self.path})

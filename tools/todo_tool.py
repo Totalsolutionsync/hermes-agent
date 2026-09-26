@@ -1,7 +1,9 @@
 """Todo tool: in-memory, revisioned task list for multi-step work. State lives on the
 AIAgent (one per session), is re-injected after context compression, and every write bumps
 a monotonic revision so UI clients can reject stale updates. One ``todo_list`` tool: pass
-``todos`` to write, omit to read; every call returns the full list. No system-prompt mutation."""
+``todos`` to write, omit to read; every call returns the full list (past
+MAX_TODO_OUTPUT_CHARS the oldest finished items are omitted) plus a ✓/✗ checklist. No
+system-prompt mutation."""
 
 import json
 from abc import ABC, abstractmethod
@@ -22,6 +24,14 @@ _TRUNCATION_MARKER = "… [truncated]"
 TODO_INJECTION_HEADER = "[Your active task list was preserved across context compression]"
 _STATUS_MARKERS = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
 _ACTIVE_STATUSES = {"pending", "in_progress"}
+# Human-readable checklist in every tool result: done and dropped must never look alike.
+CHECKLIST_MARKS = {"completed": "✓", "cancelled": "✗", "in_progress": "▶", "pending": "○"}
+_CHECKLIST_CONTENT_CHARS = 100
+# One todo tool result stays this small however long the list is: finished items are
+# omitted oldest-first (still counted in the summary), then item text is shortened.
+MAX_TODO_OUTPUT_CHARS = 16_000
+_CAPPED_CONTENT_CHARS = 200
+_MIN_CAPPED_CONTENT_CHARS = 40
 
 
 class BaseTodoStore(ABC):
@@ -154,11 +164,15 @@ class TodoStore(BaseTodoStore):
         return "\n".join(lines) if len(lines) > 1 else None
 
     @staticmethod
-    def _cap_content(content: str) -> str:
-        """Truncate to MAX_TODO_CONTENT_CHARS keeping the head (the actionable part) + marker."""
-        if len(content) > MAX_TODO_CONTENT_CHARS:
-            return content[:MAX_TODO_CONTENT_CHARS - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+    def _cap_text(content: str, limit: int) -> str:
+        """Truncate to ``limit`` chars keeping the head (the actionable part) + marker."""
+        if len(content) > limit:
+            return content[:limit - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
         return content
+
+    @staticmethod
+    def _cap_content(content: str) -> str:
+        return TodoStore._cap_text(content, MAX_TODO_CONTENT_CHARS)
 
     @staticmethod
     def _validate(item: Dict[str, Any]) -> Dict[str, str]:
@@ -216,6 +230,56 @@ class TodoStore(BaseTodoStore):
         return normalized
 
 
+def format_checklist(items: List[Dict[str, str]]) -> str:
+    """``✓ done`` / ``✗ dropped`` / ``▶ doing`` / ``○ to do`` lines, subtasks indented."""
+    by_id = {item.get("id"): item for item in items}
+    lines = []
+    for item in items:
+        depth, node, seen = 0, item, set()
+        while node.get("parent") in by_id and node["parent"] not in seen and depth < 4:
+            seen.add(node["parent"])
+            node = by_id[node["parent"]]
+            depth += 1
+        text = " ".join(str(item.get("content") or item.get("id") or "").split())
+        if len(text) > _CHECKLIST_CONTENT_CHARS:
+            text = text[:_CHECKLIST_CONTENT_CHARS - 1] + "…"
+        status = item.get("status", "pending")
+        suffix = " (dropped)" if status == "cancelled" else ""
+        lines.append(f"{'  ' * depth}{CHECKLIST_MARKS.get(status, '○')} {text}{suffix}")
+    return "\n".join(lines)
+
+
+def _todo_payload(items: List[Dict[str, str]], revision: Any) -> str:
+    summary: Dict[str, int] = {"total": len(items)}
+    for status in ("pending", "in_progress", "completed", "cancelled"):
+        summary[status] = sum(1 for i in items if i["status"] == status)
+
+    def dump(shown: List[Dict[str, str]]) -> str:
+        body = {"todos": shown, "revision": revision, "summary": summary,
+                "checklist": format_checklist(shown)}
+        if len(shown) < len(items):
+            body["omitted_finished"] = len(items) - len(shown)
+        return json.dumps(body, ensure_ascii=False)
+
+    out = dump(items)
+    if len(out) <= MAX_TODO_OUTPUT_CHARS:
+        return out
+    shown = list(items)
+    for item in [i for i in items if i["status"] not in _ACTIVE_STATUSES]:
+        shown.remove(item)
+        out = dump(shown)
+        if len(out) <= MAX_TODO_OUTPUT_CHARS:
+            return out
+    # Only unfinished items are left and they are never dropped: shorten their text instead.
+    limit, full = _CAPPED_CONTENT_CHARS, shown
+    while True:
+        shown = [dict(i, content=TodoStore._cap_text(i["content"], limit)) for i in full]
+        out = dump(shown)
+        if len(out) <= MAX_TODO_OUTPUT_CHARS or limit <= _MIN_CAPPED_CONTENT_CHARS:
+            return out
+        limit //= 2
+
+
 def todo_tool(todos: Optional[List[Dict[str, Any]]] = None, merge: bool = False,
               store: Optional[BaseTodoStore] = None) -> str:
     """Write ``todos`` (replace, or ``merge`` by id) or read when None -> list + summary JSON."""
@@ -232,11 +296,7 @@ def todo_tool(todos: Optional[List[Dict[str, Any]]] = None, merge: bool = False,
         if not isinstance(todos, list):
             return tool_error(f"todos must be a list, got {type(todos).__name__}")
         items = store.write(todos, merge)
-    summary = {"total": len(items)}
-    for status in ("pending", "in_progress", "completed", "cancelled"):
-        summary[status] = sum(1 for i in items if i["status"] == status)
-    return json.dumps({"todos": items, "revision": store.snapshot()["revision"],
-                       "summary": summary}, ensure_ascii=False)
+    return _todo_payload(items, store.snapshot()["revision"])
 
 
 def check_todo_requirements() -> bool:
@@ -258,8 +318,9 @@ TODO_SCHEMA = {
         "List order is priority. Only ONE item in_progress at a time. "
         "Break large phases into subtasks via parent. "
         "Mark an item completed only after the work is verified done, never "
-        "based on intent. If something fails, cancel it and add a revised "
-        "item. Always returns the full current list."
+        "based on intent. If something fails or is no longer needed, cancel it "
+        "(shown as dropped ✗, distinct from done ✓) and add a revised item. "
+        "Always returns the current list."
     ),
     "parameters": {
         "type": "object",

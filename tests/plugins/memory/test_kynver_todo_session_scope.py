@@ -19,6 +19,14 @@ from plugins.memory.kynver.todo_store import KynverTodoStore
 LINKAGE = OperatingLinkage(plan_id="plan-1", task_id=None, session_id=None, executor_ref="hermes:forge")
 
 
+def _prefix_filter(query: str, rows):
+    """Server-side ``?rowKeyPrefix=`` narrowing of GET progress-rows."""
+    from urllib.parse import parse_qs
+
+    prefix = (parse_qs(query).get("rowKeyPrefix") or [""])[0]
+    return [dict(r) for r in rows if str(r.get("rowKey", "")).startswith(prefix)]
+
+
 class SharedPlan:
     """One AgentOS plan with the server's focus semantics (kynver agent-os.plan-progress-*):
     focusing a row demotes every other in_progress row plan-wide; clearing resets the focused
@@ -29,8 +37,9 @@ class SharedPlan:
         self.focus_key: str | None = None
 
     def get(self, path, **kwargs):
+        path, _, query = path.partition("?")
         if path.endswith("/progress-rows"):
-            return {"items": [dict(row) for row in self.rows.values()]}
+            return {"items": _prefix_filter(query, self.rows.values())}
         return {"plan": {"id": "plan-1"}}
 
     def post(self, path, body, **kwargs):
@@ -62,11 +71,14 @@ def test_sessions_on_one_plan_only_see_and_supersede_their_own_rows():
 
     a.write([{"id": "build", "content": "A build", "status": "pending"}])
     b.write([{"id": "build", "content": "B build", "status": "pending"}])
-    # A replace write supersedes only A's omitted rows.
+    # A replace write supersedes only A's omitted rows: the unfinished one was dropped, so it
+    # is cancelled in AgentOS (not claimed completed) and leaves A's working set.
     a.write([{"id": "ship", "content": "A ship", "status": "pending"}])
 
     assert _ids(b.read()) == {"build": "pending"}
-    assert _ids(a.read()) == {"build": "completed", "ship": "pending"}
+    assert _ids(a.read()) == {"ship": "pending"}
+    assert plan.rows["hermes-todo:sess-a:build"]["status"] == "blocked"
+    assert plan.rows["hermes-todo:sess-b:build"]["status"] == "todo"
     assert _ids(KynverTodoStore(plan, linkage=LINKAGE, scope="sess-new").read()) == {}
     # The legacy unscoped row is never pulled in, and nothing rewrote it.
     assert plan.rows["hermes-todo:build"]["status"] == "todo"
@@ -131,10 +143,12 @@ def test_compaction_child_session_continues_the_same_list(tmp_path):
         assert _ids(store.read()) == {"a": "in_progress", "b": "pending"}
         store.write([{"id": "a", "status": "completed"}, {"id": "b", "status": "in_progress"}], merge=True)
 
-        # A fresh agent built on the child (gateway) sees the same list.
+        # A fresh agent built on the child (gateway) continues the same list: its unfinished
+        # items come back; finished ones stay in AgentOS, like the post-compression injection.
         fresh = SimpleNamespace(session_id="child", _session_db=db)
         fresh_store = KynverTodoStore(plan, linkage=LINKAGE, scope=lambda: session_todo_scope(fresh))
-        assert _ids(fresh_store.read()) == {"a": "completed", "b": "in_progress"}
+        assert _ids(fresh_store.read()) == {"b": "in_progress"}
+        assert plan.rows["hermes-todo:root:a"]["status"] == "partial"
         assert {key for key in plan.rows} == {"hermes-todo:root:a", "hermes-todo:root:b"}
 
         # A branch off the conversation is its own lineage and starts empty.

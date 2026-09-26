@@ -78,7 +78,8 @@ def test_replace_todo_write_supersedes_omitted_hermes_rows():
     rows = rows_call.args[1]["rows"]
     by_key = {row["rowKey"]: row for row in rows}
     assert by_key["hermes-todo:s1:current"]["status"] == "todo"
-    assert by_key["hermes-todo:s1:old"]["status"] == "partial"
+    # Dropped unfinished work is cancelled (`blocked`), never reported as completed.
+    assert by_key["hermes-todo:s1:old"]["status"] == "blocked"
     assert "external:keep" not in by_key
 
 
@@ -226,4 +227,4 @@ def test_pre_tool_call_blocks_todo_when_projection_blocked(monkeypatch):
         "message": block["message"],
     }
     assert "running" in block["message"] or "lease" in block["message"]
-    client.get.assert_called_with("/plans/plan-bound/progress-rows")
+    assert client.get.call_args.args[0].startswith("/plans/plan-bound/progress-rows?rowKeyPrefix=")

@@ -126,6 +126,8 @@ def get_prompt_blocks(agent: Any) -> List[str]:
     if provider == "kynver" and getattr(agent, "_kynver_active", False):
         blocks.append(
             "[Kynver: session todos sync to AgentOS plan progress; "
-            "in_progress is current focus, not harness running lease]"
+            "in_progress is current focus, not harness running lease. "
+            "1–2 step lists stay in the Inbox; a list of 3+ gets its own plan automatically — "
+            "never link plans by hand. Mark dropped items cancelled (✗), not completed (✓)]"
         )
     return blocks

@@ -6,6 +6,11 @@ session key (``hermes:<compression-lineage root>``, i.e. the todo scope) and its
 then projects that session's rows into the returned plan. The binding is persisted in Kynver,
 so compression, gateway restarts and a fresh agent on the child session keep the same plan.
 
+Lists grow into plans automatically (no link command): one-off lists (1–2 items) live in the
+workspace Inbox; once a session's list reaches ``PROMOTE_MIN_ITEMS`` while it is on the Inbox,
+the store asks Kynver to ``promote`` it — Kynver gives the session its own plan and moves the
+rows already written there. Sessions bound to a task/context/explicit plan never move.
+
 ``KYNVER_PLAN_ID`` is a legacy fallback only: used when the binding endpoint does not exist
 (an older Kynver deploy answers 404/405) or when ``KYNVER_TODO_PLAN_BINDING=off``. Transient
 failures raise, so the todo store degrades to its local cache and retries — they never
@@ -29,6 +34,9 @@ BINDING_PATH = "/todos/plan-binding"
 _MISSING_ENDPOINT = re.compile(r"\bHTTP (404|405)\b")
 _DEFAULT_TTL_SECONDS = 300.0
 _MAX_CACHED_SCOPES = 512
+# A list this long is planned work, not an Inbox one-off (Kynver TODO_PLAN_PROMOTE_MIN_ITEMS).
+PROMOTE_MIN_ITEMS = 3
+_PROMOTE_TITLE_CHARS = 120
 
 
 def plan_binding_enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -47,8 +55,12 @@ def session_key_for_scope(scope: str) -> str:
 class ResolvedTodoPlan:
     plan_id: str
     title: str
-    source: str  # explicit | context | task | inbox | legacy
+    source: str  # explicit | context | task | inbox | promoted | legacy
     bound: bool
+
+    @property
+    def is_inbox(self) -> bool:
+        return self.source == "inbox"
 
 
 class TodoPlanResolver:
@@ -70,6 +82,9 @@ class TodoPlanResolver:
         self._clock = clock
         self._cache: "OrderedDict[str, tuple[ResolvedTodoPlan, float]]" = OrderedDict()
         self._endpoint_missing_at: Optional[float] = None
+        # scope -> when a promote request came back still on the Inbox (Kynver without
+        # promote support); not retried within the TTL.
+        self._promote_refused: "OrderedDict[str, float]" = OrderedDict()
 
     def legacy(self) -> Optional[ResolvedTodoPlan]:
         plan_id = self._linkage.plan_id
@@ -128,17 +143,32 @@ class TodoPlanResolver:
                 return self.legacy()
             raise
 
-    def bind(self, scope: str, *, plan_id: str | None = None, task_id: str | None = None) -> ResolvedTodoPlan:
-        """Explicitly move ``scope``'s todo list to ``plan_id`` (or ``task_id``'s plan)."""
+    def promote(self, scope: str, *, title: str = "") -> Optional[ResolvedTodoPlan]:
+        """Move an Inbox-bound ``scope`` onto its own plan (Kynver moves its rows there).
 
-        if not scope:
-            raise KynverAgentOSError("Kynver todo plan binding needs a session scope")
-        body: dict[str, Any] = {"sessionKey": session_key_for_scope(scope), "bind": True}
-        if plan_id:
-            body["planId"] = plan_id
-        if task_id:
-            body["taskId"] = task_id
-        return self._remember(scope, self._request(body))
+        Returns the new plan, or None when nothing changed: not on the Inbox, binding off,
+        or a Kynver that does not promote (remembered for the TTL so writes do not keep
+        asking). Raises KynverAgentOSError on transient failures."""
+
+        current = self.plan_for(scope)
+        if current is None or not current.is_inbox:
+            return None
+        refused_at = self._promote_refused.get(scope)
+        if refused_at is not None and self._clock() - refused_at < self._ttl:
+            return None
+        body: dict[str, Any] = {
+            "sessionKey": session_key_for_scope(scope),
+            "promote": {"title": " ".join(title.split())[:_PROMOTE_TITLE_CHARS]},
+        }
+        if self._linkage.task_id:
+            body["hints"] = {"taskId": self._linkage.task_id}
+        plan = self._remember(scope, self._request(body))
+        if plan.is_inbox:
+            self._promote_refused[scope] = self._clock()
+            while len(self._promote_refused) > _MAX_CACHED_SCOPES:
+                self._promote_refused.popitem(last=False)
+            return None
+        return plan
 
     def linkage_for(self, scope: str) -> OperatingLinkage:
         """``linkage`` with ``plan_id`` set to the scope's plan (None → local only)."""

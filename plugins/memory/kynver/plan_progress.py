@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
+import urllib.parse
 from typing import Any
 
 from .agentos_bridge import KynverAgentOSClient, KynverAgentOSError
 from .operating_config import OperatingLinkage
 from .pre_transition import (
+    HERMES_TODO_PREFIX,
     PreTransitionError,
     assert_focus_allowed,
     assert_single_in_progress,
@@ -34,6 +36,23 @@ _ROW_TO_HERMES: dict[str, str] = {
     "blocked": "cancelled",
     "done": "completed",
 }
+
+
+# Row statuses of a finished todo. A finished row belongs to the working set only while it is
+# on the session's current list; otherwise it is history and stays in AgentOS.
+_TERMINAL_ROWS = frozenset({"partial", "blocked", "done"})
+
+
+def _scoped_rows(client: KynverAgentOSClient, plan_id: str, scope: str | None) -> list[dict[str, Any]]:
+    """Progress rows of ``plan_id``, narrowed server-side to ``scope``'s own rows when scoped
+    (``?rowKeyPrefix=``; an older Kynver ignores it and returns every row — callers still
+    filter by scope)."""
+    path = f"/plans/{plan_id}/progress-rows"
+    if scope:
+        path += "?rowKeyPrefix=" + urllib.parse.quote(f"{HERMES_TODO_PREFIX}{scope}:", safe="")
+    payload = client.get(path)
+    items = payload.get("items") if isinstance(payload, dict) else payload
+    return [r for r in (items or []) if isinstance(r, dict)]
 
 
 def _row_index(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -65,11 +84,7 @@ def inspect_todo_write(
     if not scope:
         return None
 
-    plan_path = f"/plans/{linkage.plan_id}"
-    rows_payload = client.get(f"{plan_path}/progress-rows")
-    items = rows_payload.get("items") if isinstance(rows_payload, dict) else rows_payload
-    rows = list(items or [])
-    by_key = _row_index(rows)
+    by_key = _row_index(_scoped_rows(client, linkage.plan_id, scope))
 
     for item in todos:
         todo_id = str(item.get("id") or "").strip()
@@ -106,9 +121,7 @@ def project_todo_write(
         raise PreTransitionError(blocked)
 
     plan_path = f"/plans/{linkage.plan_id}"
-    rows_payload = client.get(f"{plan_path}/progress-rows")
-    items = rows_payload.get("items") if isinstance(rows_payload, dict) else rows_payload
-    rows = list(items or [])
+    rows = _scoped_rows(client, linkage.plan_id, scope)
     by_key = _row_index(rows)
 
     upserts: list[dict[str, Any]] = []
@@ -144,17 +157,22 @@ def project_todo_write(
         )
 
     if not merge:
-        # Replace supersedes only this session's rows; other sessions share the plan.
+        # Replace supersedes only this session's rows; other sessions share the plan. An
+        # unfinished row left off the new list was dropped, so it becomes cancelled (never
+        # "completed" — that would claim work that was not done); a finished row keeps the
+        # outcome it already has.
         for row in rows:
             row_key = str(row.get("rowKey") or "")
             todo_id = todo_id_in_scope(row_key, scope)
             if not todo_id or row_key in requested_row_keys:
                 continue
+            if str(row.get("status") or "") in _TERMINAL_ROWS:
+                continue
             upserts.append(
                 {
                     "rowKey": row_key,
                     "title": str(row.get("title") or todo_id)[:500],
-                    "status": "partial",
+                    "status": _STATUS_TO_ROW["cancelled"],
                     "taskId": linkage.task_id,
                 }
             )
@@ -221,8 +239,13 @@ def reconcile_todos_from_kynver(
     *,
     scope: str | None,
 ) -> list[dict[str, Any]]:
-    """Merge this session's plan rows into ``local_items``. Rows of other sessions and legacy
-    unscoped rows stay in AgentOS but never enter the session list."""
+    """Merge this session's plan rows into ``local_items`` — the session's working set only.
+
+    Rows of other sessions and legacy unscoped rows never enter the list. Of this session's
+    own rows, a finished one (completed/cancelled) is shown only while it is still on the
+    local list; one that was superseded by a replace, or finished before this process
+    started, stays in AgentOS as history. Unfinished rows always come back, so a list
+    written before a restart is not lost."""
     if not linkage.plan_id or not scope:
         return [item.copy() for item in local_items]
 
@@ -232,15 +255,15 @@ def reconcile_todos_from_kynver(
     # GET /plans/:id currently omits inProgressRowKey; row status alone then carries focus.
     in_progress_key = plan_body.get("inProgressRowKey") if isinstance(plan_body, dict) else None
 
-    rows_payload = client.get(f"{plan_path}/progress-rows")
-    items = rows_payload.get("items") if isinstance(rows_payload, dict) else rows_payload
-    remote_rows = [r for r in (items or []) if isinstance(r, dict)]
+    remote_rows = _scoped_rows(client, linkage.plan_id, scope)
 
     by_id = {str(item.get("id")): dict(item) for item in local_items}
     for row in remote_rows:
         row_key = str(row.get("rowKey") or "")
         todo_id = todo_id_in_scope(row_key, scope)
         if not todo_id:
+            continue
+        if todo_id not in by_id and str(row.get("status") or "") in _TERMINAL_ROWS and row_key != in_progress_key:
             continue
         status = _ROW_TO_HERMES.get(str(row.get("status") or "todo"), "pending")
         if row_key == in_progress_key:
