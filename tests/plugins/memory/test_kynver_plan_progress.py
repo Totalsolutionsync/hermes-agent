@@ -169,21 +169,24 @@ def test_safe_project_returns_blocked_without_raise():
     assert out.get("blocked") is True
 
 
-def test_single_in_progress_guard():
+def test_parallel_in_progress_items_are_allowed():
+    """Several background workers each hold an in_progress item; nothing rejects that."""
     client = MagicMock()
     client.get.return_value = {"items": []}
     linkage = OperatingLinkage(plan_id="p", task_id=None, session_id=None, executor_ref="hermes:forge")
-    with pytest.raises(PreTransitionError):
-        project_todo_write(
-            client,
-            linkage,
-            [
-                {"id": "1", "status": "in_progress", "content": "a"},
-                {"id": "2", "status": "in_progress", "content": "b"},
-            ],
-            merge=False,
-            scope="s1",
-        )
+    out = project_todo_write(
+        client,
+        linkage,
+        [
+            {"id": "1", "status": "in_progress", "content": "a"},
+            {"id": "2", "status": "in_progress", "content": "b"},
+        ],
+        merge=False,
+        scope="s1",
+    )
+    assert out["projected"] is True
+    rows = [r for call in client.post.call_args_list if call.args[0].endswith("/progress-rows") for r in call.args[1]["rows"]]
+    assert [r["status"] for r in rows] == ["in_progress", "in_progress"]
 
 
 def test_pre_tool_call_blocks_todo_when_projection_blocked(monkeypatch):

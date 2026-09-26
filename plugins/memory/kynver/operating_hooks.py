@@ -12,7 +12,6 @@ from typing import Any, Optional
 from .agentos_bridge import (
     KynverAgentOSClient,
     KynverAgentOSError,
-    agentos_enabled,
     load_kynver_agentos_config,
 )
 from .operating_config import kynver_operating_tools_enabled, load_operating_linkage
@@ -88,10 +87,7 @@ def on_transform_tool_result(
 
 
 def register_operating_hooks(ctx) -> None:
-    if not agentos_enabled():
-        return
-    if not kynver_operating_tools_enabled():
-        return
-    ctx.register_hook("pre_tool_call", on_pre_tool_call)
-    ctx.register_hook("transform_tool_result", on_transform_tool_result)
-    logger.info("Kynver operating hooks registered (todo pre-transition guards)")
+    """No hooks: Kynver enforces todo transitions inside the one ``/todos/session`` call, so a
+    pre-call guard would only add Kynver round trips (it used to cost 1–2 per write).
+    ``on_pre_tool_call`` stays importable for an older Kynver's legacy projection path."""
+    return None

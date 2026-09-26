@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+from agent.todo_nudge import attach_hint as attach_todo_hint, todo_tracking_hint
 from agent.display import (
     KawaiiSpinner,
     build_tool_preview as _build_tool_preview,
@@ -1111,6 +1112,15 @@ def _commit_tool_result(
             config=budget,
         )
     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
+
+    if not blocked and not is_error and isinstance(persisted_result, str):
+        # Background work the todo list does not track yet: say so on this result (never the prompt).
+        try:
+            persisted_result = attach_todo_hint(
+                persisted_result, todo_tracking_hint(agent, function_name, function_args, function_result),
+            )
+        except Exception as _nudge_err:
+            logging.debug("todo tracking hint failed: %s", _nudge_err)
 
     subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
     if subdir_hints:

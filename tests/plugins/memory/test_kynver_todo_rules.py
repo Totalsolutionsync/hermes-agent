@@ -51,6 +51,8 @@ class Kynver:
         return {"plan": {"id": plan}}
 
     def post(self, path, body, **kwargs):
+        if path == "/todos/session":  # an older Kynver: legacy projection path
+            raise KynverAgentOSError("Kynver AgentOS HTTP 404: Not found", status=404)
         if path == plan_binding.BINDING_PATH:
             key = body["sessionKey"]
             plan, source = self.bindings.setdefault(key, ("inbox", "inbox"))

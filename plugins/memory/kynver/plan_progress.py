@@ -13,7 +13,6 @@ from .pre_transition import (
     HERMES_TODO_PREFIX,
     PreTransitionError,
     assert_focus_allowed,
-    assert_single_in_progress,
     hermes_row_key,
     normalize_hermes_status,
     todo_id_in_scope,
@@ -74,13 +73,12 @@ def inspect_todo_write(
 ) -> str | None:
     """Validate a todo write without mutating Kynver. Returns block message or None.
 
-    Without a ``scope`` the session's rows cannot be located, so only the row-independent
-    single-in_progress rule is checked."""
+    Any number of items may be in_progress (parallel workers). Without a ``scope`` the
+    session's rows cannot be located, so nothing is checked."""
 
     if not linkage.plan_id:
         return None
 
-    assert_single_in_progress(todos)
     if not scope:
         return None
 

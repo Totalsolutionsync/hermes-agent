@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from plugins.memory.kynver.agentos_bridge import KynverAgentOSError
 from plugins.memory.kynver.operating_config import OperatingLinkage
 from plugins.memory.kynver.plan_progress import project_todo_write
 from plugins.memory.kynver.pre_transition import PreTransitionError
@@ -37,6 +38,8 @@ class PlanProgressFakeClient:
         return {}
 
     def post(self, path, body, **kwargs):
+        if path == "/todos/session":  # an older Kynver: legacy projection path
+            raise KynverAgentOSError("Kynver AgentOS HTTP 404: Not found", status=404)
         self.calls.append(("POST", path, body))
         if path.endswith("progress-rows"):
             for row in body.get("rows", []):

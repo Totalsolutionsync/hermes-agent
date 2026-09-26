@@ -55,6 +55,8 @@ class BindingFakeClient:
         return {"plan": {"id": plan, "inProgressRowKey": self.focus.get(plan)}}
 
     def post(self, path, body, **kwargs):
+        if path == "/todos/session":  # an older Kynver: legacy projection path
+            raise KynverAgentOSError("Kynver AgentOS HTTP 404: Not found", status=404)
         self.calls.append(("POST", path, body))
         if path == plan_binding.BINDING_PATH:
             if self.binding_error:

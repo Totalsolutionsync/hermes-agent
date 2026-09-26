@@ -307,7 +307,7 @@ the meantime.
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `todo_list` | Manage your task list for the current session. Use for complex tasks with 3+ steps or when the user provides multiple tasks. Call with no parameters to read the current list. Items may nest: an item's optional `parent` field points at another item's id, making it a subtask — surfaces render the tree indented. | — |
+| `todo_list` | The agent's working memory for everything it is tracking in the chat: multi-step work, background workers (one item each, `in_progress` while running — any number can be in progress at once) and things waiting on the user. Call with no parameters to read the list (do so when resuming work); update it in the same turn something starts, finishes or fails; mark ✓ only after verifying; cancel (✗) and add a replacement when something is dropped. Items may nest via `parent`. With the Kynver memory provider the list is a live view of shared Kynver plan rows (others may tick items; results show who), and `plan` picks up a handed-over plan. | — |
 
 ## `vision` toolset
 

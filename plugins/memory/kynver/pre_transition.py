@@ -65,12 +65,6 @@ def todo_id_in_scope(row_key: str, scope: str | None) -> str | None:
     return parsed[1]
 
 
-def assert_single_in_progress(todos: list[dict[str, Any]]) -> None:
-    active = [t for t in todos if normalize_hermes_status(str(t.get("status", ""))) == "in_progress"]
-    if len(active) > 1:
-        raise PreTransitionError("only one todo may be in_progress at a time")
-
-
 def assert_focus_allowed(*, row_status: str | None, next_hermes_status: str) -> None:
     if next_hermes_status != "in_progress":
         return

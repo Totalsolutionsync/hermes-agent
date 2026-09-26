@@ -260,7 +260,7 @@ def _observed(function_name: str, executor: InlineToolExecutor) -> InlineToolExe
 # Order is the historical if/elif order of ``execute_tool_calls_sequential``.
 INLINE_TOOL_EXECUTORS: Dict[str, InlineToolExecutor] = {
     "todo_list": _observed("todo_list", _tool(
-        "tools.todo_tool", "todo_tool", ("todos", "todos"), ("merge", "merge", False),
+        "tools.todo_tool", "todo_tool", ("todos", "todos"), ("merge", "merge", False), ("plan", "plan"),
         store=lambda agent, ctx: agent._todo_store,
     )),
     # Bot Mode teammate DM is injected, not registered: only a canonical Bot

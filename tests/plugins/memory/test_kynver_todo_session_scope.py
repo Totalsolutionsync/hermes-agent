@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_state import SessionDB
+from plugins.memory.kynver.agentos_bridge import KynverAgentOSError
 from plugins.memory.kynver.integration import session_todo_scope
 from plugins.memory.kynver.operating_config import OperatingLinkage
 from plugins.memory.kynver.pre_transition import parse_hermes_row_key
@@ -43,6 +44,8 @@ class SharedPlan:
         return {"plan": {"id": "plan-1"}}
 
     def post(self, path, body, **kwargs):
+        if path == "/todos/session":  # an older Kynver: legacy projection path
+            raise KynverAgentOSError("Kynver AgentOS HTTP 404: Not found", status=404)
         if path.endswith("/progress-rows"):
             for row in body["rows"]:
                 self.rows[row["rowKey"]] = dict(row)

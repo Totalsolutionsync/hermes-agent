@@ -6,6 +6,7 @@ MAX_TODO_OUTPUT_CHARS the oldest finished items are omitted) plus a ✓/✗ chec
 system-prompt mutation."""
 
 import json
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +33,8 @@ _CHECKLIST_CONTENT_CHARS = 100
 MAX_TODO_OUTPUT_CHARS = 16_000
 _CAPPED_CONTENT_CHARS = 200
 _MIN_CAPPED_CONTENT_CHARS = 40
+# An in_progress item untouched this long gets a nudge in the todo result (workers run ≤3h).
+STALE_IN_PROGRESS_SECONDS = 2 * 3600
 
 
 class BaseTodoStore(ABC):
@@ -60,6 +63,18 @@ class BaseTodoStore(ABC):
     @abstractmethod
     def format_for_injection(self) -> Optional[str]: ...
 
+    def adopt(self, ref: str) -> List[Dict[str, str]]:
+        """Make a shared plan handed over by id/title/link this session's list (Kynver store)."""
+        raise NotImplementedError("Picking up a shared plan needs the Kynver todo store")
+
+    def sync_info(self) -> Dict[str, Any]:
+        """Where the last list came from (shared plan, or a local fallback and why)."""
+        return {}
+
+    def in_progress_since(self) -> Dict[str, float]:
+        """``{id: epoch seconds}`` each in_progress item went in progress, when known."""
+        return {}
+
 
 class TodoStore(BaseTodoStore):
     """In-memory todo list, one per AIAgent. List position is priority; items are
@@ -68,6 +83,16 @@ class TodoStore(BaseTodoStore):
     def __init__(self):
         self._items: List[Dict[str, str]] = []
         self._revision = 0
+        self._since: Dict[str, float] = {}
+
+    def _track_since(self) -> None:
+        """Remember when each item went in_progress (stale-work hints)."""
+        now = time.time()
+        active = {i["id"] for i in self._items if i["status"] == "in_progress"}
+        self._since = {i: self._since.get(i, now) for i in active}
+
+    def in_progress_since(self) -> Dict[str, float]:
+        return dict(self._since)
 
     def _fresh_items(self, todos: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         """Validate, dedupe and order a whole new list (replace / restore)."""
@@ -82,6 +107,7 @@ class TodoStore(BaseTodoStore):
             self._items = self._fresh_items(todos)
         del self._items[MAX_TODO_ITEMS:]  # keep the priority head; replays can't grow unbounded
         self._sanitize_parents(self._items)
+        self._track_since()
         if self._items != before:
             self._revision += 1
         return self.read()
@@ -126,6 +152,7 @@ class TodoStore(BaseTodoStore):
     def restore(self, todos: List[Dict[str, Any]], *, revision: Any = 0) -> List[Dict[str, str]]:
         """Restore a trusted snapshot without manufacturing a new revision."""
         self._items = self._fresh_items(todos)[:MAX_TODO_ITEMS]
+        self._track_since()
         try:
             self._revision = max(0, int(revision or 0))
         except (TypeError, ValueError):
@@ -231,7 +258,8 @@ class TodoStore(BaseTodoStore):
 
 
 def format_checklist(items: List[Dict[str, str]]) -> str:
-    """``✓ done`` / ``✗ dropped`` / ``▶ doing`` / ``○ to do`` lines, subtasks indented."""
+    """``✓ done`` / ``✗ dropped`` / ``▶ doing`` / ``○ to do`` lines, subtasks indented; an item
+    someone else changed (another chat, a cron, Kynver) ends with ``— by <who>``."""
     by_id = {item.get("id"): item for item in items}
     lines = []
     for item in items:
@@ -245,20 +273,42 @@ def format_checklist(items: List[Dict[str, str]]) -> str:
             text = text[:_CHECKLIST_CONTENT_CHARS - 1] + "…"
         status = item.get("status", "pending")
         suffix = " (dropped)" if status == "cancelled" else ""
+        if item.get("by"):
+            suffix += f" — by {item['by']}"
         lines.append(f"{'  ' * depth}{CHECKLIST_MARKS.get(status, '○')} {text}{suffix}")
     return "\n".join(lines)
 
 
-def _todo_payload(items: List[Dict[str, str]], revision: Any) -> str:
+def stale_in_progress_hint(items: List[Dict[str, str]], since: Dict[str, float],
+                           now: Optional[float] = None) -> Optional[str]:
+    """Nudge for in_progress items untouched for STALE_IN_PROGRESS_SECONDS, else None."""
+    now = time.time() if now is None else now
+    stale = [(i, now - since[i["id"]]) for i in items
+             if i.get("status") == "in_progress" and i.get("id") in since
+             and now - since[i["id"]] >= STALE_IN_PROGRESS_SECONDS]
+    if not stale:
+        return None
+    names = ", ".join(f"'{' '.join(i['content'].split())[:60]}' ({int(age // 3600)}h)" for i, age in stale[:3])
+    more = f" and {len(stale) - 3} more" if len(stale) > 3 else ""
+    return (f"In progress with no update: {names}{more}. Still running? Mark each ✓/✗ "
+            "or note what it is waiting on.")
+
+
+def _todo_payload(items: List[Dict[str, str]], revision: Any, *, sync: Optional[Dict[str, Any]] = None,
+                  hint: Optional[str] = None) -> str:
     summary: Dict[str, int] = {"total": len(items)}
     for status in ("pending", "in_progress", "completed", "cancelled"):
         summary[status] = sum(1 for i in items if i["status"] == status)
 
     def dump(shown: List[Dict[str, str]]) -> str:
-        body = {"todos": shown, "revision": revision, "summary": summary,
-                "checklist": format_checklist(shown)}
+        body: Dict[str, Any] = {"todos": shown, "revision": revision, "summary": summary,
+                                "checklist": format_checklist(shown)}
         if len(shown) < len(items):
             body["omitted_finished"] = len(items) - len(shown)
+        if sync:
+            body["sync"] = sync
+        if hint:
+            body["hint"] = hint
         return json.dumps(body, ensure_ascii=False)
 
     out = dump(items)
@@ -281,13 +331,12 @@ def _todo_payload(items: List[Dict[str, str]], revision: Any) -> str:
 
 
 def todo_tool(todos: Optional[List[Dict[str, Any]]] = None, merge: bool = False,
-              store: Optional[BaseTodoStore] = None) -> str:
-    """Write ``todos`` (replace, or ``merge`` by id) or read when None -> list + summary JSON."""
+              store: Optional[BaseTodoStore] = None, plan: Optional[str] = None) -> str:
+    """Write ``todos`` (replace, or ``merge`` by id) or read when None -> list + summary JSON.
+    ``plan`` first adopts a shared plan handed over (Kynver store)."""
     if store is None:
         return tool_error("TodoStore not initialized")
-    if todos is None:
-        items = store.read()
-    else:
+    if todos is not None:
         if isinstance(todos, str):  # LLMs sometimes send a JSON string instead of a list
             try:
                 todos = json.loads(todos)
@@ -295,8 +344,16 @@ def todo_tool(todos: Optional[List[Dict[str, Any]]] = None, merge: bool = False,
                 return tool_error("todos must be a list of objects, got unparseable string")
         if not isinstance(todos, list):
             return tool_error(f"todos must be a list, got {type(todos).__name__}")
-        items = store.write(todos, merge)
-    return _todo_payload(items, store.snapshot()["revision"])
+    try:
+        items = store.adopt(plan.strip()) if isinstance(plan, str) and plan.strip() else None
+        if todos is not None:
+            items = store.write(todos, merge)
+        elif items is None:
+            items = store.read()
+    except (NotImplementedError, ValueError) as exc:  # ValueError: a transition the store refused
+        return tool_error(str(exc))
+    return _todo_payload(items, store.snapshot()["revision"], sync=store.sync_info(),
+                         hint=stale_in_progress_hint(items, store.in_progress_since()))
 
 
 def check_todo_requirements() -> bool:
@@ -309,18 +366,14 @@ def check_todo_requirements() -> bool:
 TODO_SCHEMA = {
     "name": "todo_list",
     "description": (
-        # See #95681.
-        "Track a task list for multi-step work (3+ steps). Use for complex tasks "
-        "with 3+ steps or when the user provides multiple tasks. "
-        "For 'all N items' tasks, enumerate every instance as its own checklist "
-        "item so none are silently dropped. "
-        "Call with no parameters to read the current list.\n"
-        "List order is priority. Only ONE item in_progress at a time. "
-        "Break large phases into subtasks via parent. "
-        "Mark an item completed only after the work is verified done, never "
-        "based on intent. If something fails or is no longer needed, cancel it "
-        "(shown as dropped ✗, distinct from done ✓) and add a revised item. "
-        "Always returns the current list."
+        # See #95681. Kept short: this schema rides on every call.
+        "Your working memory for everything you are tracking in this chat: multi-step work "
+        "(3+ steps; one item per instance for 'all N' tasks), background workers (one item "
+        "each, in_progress while it runs; any number can be in progress) and things waiting "
+        "on the user ('Needs <user>: …'). Read it (no args) when resuming work. Update it in "
+        "the same turn something starts, finishes or fails. Order is priority; nest subtasks "
+        "with parent. Mark completed only after verifying; if dropped or failed, cancel it "
+        "(✗, distinct from ✓) and add the replacement. Returns the current list."
     ),
     "parameters": {
         "type": "object",
@@ -350,6 +403,11 @@ TODO_SCHEMA = {
                     "required": ["id", "content", "status"]
                 }
             },
+            "plan": {
+                "type": "string",
+                "description": "Pick up a shared plan handed to you (Kynver plan id, title or link; "
+                               "session:<id> for another chat's list). Its items become this list."
+            },
             "merge": {
                 "type": "boolean",
                 "description": (
@@ -369,5 +427,6 @@ from tools.registry import registry, tool_error
 registry.register(
     name="todo_list", toolset="todo", schema=TODO_SCHEMA, check_fn=check_todo_requirements,
     handler=lambda args, **kw: todo_tool(
-        todos=args.get("todos"), merge=args.get("merge", False), store=kw.get("store")),
+        todos=args.get("todos"), merge=args.get("merge", False), store=kw.get("store"),
+        plan=args.get("plan")),
     emoji="📋")
