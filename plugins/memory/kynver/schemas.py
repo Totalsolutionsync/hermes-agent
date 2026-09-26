@@ -27,7 +27,16 @@ MEMORY_WRITE_SCHEMA = {
             "key": {"type": "string", "description": "Optional stable memory key. For a correction, the new entry's key (must differ from supersedes; defaults to '<supersedes>-correction')."},
             "memoryType": {"type": "string", "description": "fact, decision, preference, lesson, or runbook."},
             "supersedes": {"type": "string", "description": "Key of an existing memory this content corrects and replaces."},
-            "reason": {"type": "string", "description": "Why the old memory is wrong. Required with supersedes."},
+            "reason": {"type": "string", "description": "Why the old entry is being replaced. Required with supersedes."},
+            "reasonClass": {
+                "type": "string",
+                "enum": ["requirement_change", "memory_wrong", "test"],
+                "description": (
+                    "Required with supersedes. requirement_change: the user changed an instruction or rule, "
+                    "so the old memory was right when written. memory_wrong: the stored fact was false or stale. "
+                    "test: a self-test of this tool. Only memory_wrong counts against memory-quality health."
+                ),
+            },
         },
         "required": ["content"],
     },

@@ -82,6 +82,8 @@ _KYNVER_SCOPE_KEYWORDS: frozenset[str] = frozenset({
 })
 
 _CORRECTION_ACTIONS: frozenset[str] = frozenset({"replace", "correct", "update", "retract"})
+# Why a correction happened; Kynver scores only memory_wrong as an L1 memory defect.
+_CORRECTION_REASON_CLASSES: tuple[str, ...] = ("requirement_change", "memory_wrong", "test")
 
 
 def classify_kynver_memory_scope(
@@ -982,6 +984,7 @@ class KynverMemoryProvider(MemoryProvider):
         *,
         target_key: str,
         reason: str,
+        reason_class: str,
         key: str = "",
         memory_type: str = "",
         timeout: Optional[float] = None,
@@ -1003,6 +1006,7 @@ class KynverMemoryProvider(MemoryProvider):
                 "targetSlug": target_key,
                 "content": clean,
                 "reason": reason,
+                "reasonClass": reason_class,
                 "key": key or None,
                 "memoryType": memory_type or None,
                 "sourceId": SOURCE_ID,
@@ -1025,7 +1029,13 @@ class KynverMemoryProvider(MemoryProvider):
         if supersedes:
             reason = str(args.get("reason") or "").strip()
             if not reason:
-                return tool_error("reason is required when supersedes is set: say why the old memory is wrong")
+                return tool_error("reason is required when supersedes is set: say why the old memory is replaced")
+            reason_class = str(args.get("reasonClass") or "").strip()
+            if reason_class not in _CORRECTION_REASON_CLASSES:
+                return tool_error(
+                    "reasonClass is required when supersedes is set: requirement_change (the user changed "
+                    "an instruction), memory_wrong (the stored fact was false or stale), or test (self-test)"
+                )
             if key == supersedes:
                 return tool_error(
                     "key must differ from supersedes: the correction is a new entry that retires the old one. "
@@ -1036,6 +1046,7 @@ class KynverMemoryProvider(MemoryProvider):
                     content,
                     target_key=supersedes,
                     reason=reason,
+                    reason_class=reason_class,
                     key=key,
                     memory_type=memory_type,
                 )
@@ -1045,8 +1056,8 @@ class KynverMemoryProvider(MemoryProvider):
                 new_key = key or f"{supersedes}-correction"
                 return tool_error(
                     f"a memory with key '{new_key}' already exists with different content. "
-                    f"If it is the entry to fix, call kynver_memory_write with supersedes='{new_key}' "
-                    "and a reason; otherwise pass a new key."
+                    f"If it is the entry to fix, call kynver_memory_write with supersedes='{new_key}', "
+                    "a reason and a reasonClass; otherwise pass a new key."
                 )
             return _json_result(
                 {"success": True, "corrected": supersedes, "result": result, "sourceId": SOURCE_ID}
@@ -1064,8 +1075,10 @@ class KynverMemoryProvider(MemoryProvider):
                 raise
             return tool_error(
                 f"a memory with key '{key}' already exists with different content; to replace it, "
-                f"call kynver_memory_write with supersedes='{key}' and a reason (the old entry is "
-                "retired with an audit record). Do not write a duplicate under a new key."
+                f"call kynver_memory_write with supersedes='{key}', a reason and a reasonClass "
+                "(requirement_change if the user changed the instruction, memory_wrong if the stored "
+                "fact was false; the old entry is retired with an audit record). "
+                "Do not write a duplicate under a new key."
             )
         return _json_result({"success": True, "result": result, "sourceId": SOURCE_ID})
 

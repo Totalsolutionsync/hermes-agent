@@ -97,7 +97,12 @@ def test_keyed_rewrite_conflict_is_actionable_and_correction_supersedes(kynver):
 
     fixed = json.loads(provider.handle_tool_call(
         "kynver_memory_write",
-        {"content": "Deploys run on Tuesdays.", "supersedes": "deploy-day", "reason": "Schedule moved."},
+        {
+            "content": "Deploys run on Tuesdays.",
+            "supersedes": "deploy-day",
+            "reason": "Schedule moved.",
+            "reasonClass": "requirement_change",
+        },
     ))
     assert fixed["success"] is True and fixed["corrected"] == "deploy-day"
     path, body = fake.requests[-1]
@@ -106,6 +111,7 @@ def test_keyed_rewrite_conflict_is_actionable_and_correction_supersedes(kynver):
         "targetSlug": "deploy-day",
         "content": "Deploys run on Tuesdays.",
         "reason": "Schedule moved.",
+        "reasonClass": "requirement_change",
         "sourceId": "hermes:forge",
     }
 
@@ -117,8 +123,41 @@ def test_correction_requires_reason_and_a_distinct_key(kynver):
     ))
     same_key = json.loads(provider.handle_tool_call(
         "kynver_memory_write",
-        {"content": "x", "supersedes": "deploy-day", "key": "deploy-day", "reason": "r"},
+        {
+            "content": "x",
+            "supersedes": "deploy-day",
+            "key": "deploy-day",
+            "reason": "r",
+            "reasonClass": "memory_wrong",
+        },
     ))
     assert "reason is required" in no_reason["error"]
     assert "must differ" in same_key["error"]
     assert fake.requests == []
+
+
+@pytest.mark.parametrize("reason_class", [None, "", "because", "requirement-change"])
+def test_correction_requires_a_known_reason_class(kynver, reason_class):
+    """Kynver scores only memory_wrong corrections as memory defects, so every
+    correction must say why it happened; nothing is sent without it."""
+    fake, provider = kynver
+    args = {"content": "x", "supersedes": "deploy-day", "reason": "r"}
+    if reason_class is not None:
+        args["reasonClass"] = reason_class
+    result = json.loads(provider.handle_tool_call("kynver_memory_write", args))
+    assert "reasonClass is required" in result["error"]
+    assert fake.requests == []
+
+
+@pytest.mark.parametrize("reason_class", ["requirement_change", "memory_wrong", "test"])
+def test_each_reason_class_reaches_kynver(kynver, reason_class):
+    fake, provider = kynver
+    fake.memories["deploy-day"] = "Deploys run on Fridays."
+    result = json.loads(provider.handle_tool_call(
+        "kynver_memory_write",
+        {"content": "y", "supersedes": "deploy-day", "reason": "r", "reasonClass": reason_class},
+    ))
+    assert result["success"] is True
+    path, body = fake.requests[-1]
+    assert path == f"/api/agent-os/{SLUG}/memory/correct"
+    assert body["reasonClass"] == reason_class
