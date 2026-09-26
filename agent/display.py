@@ -1057,10 +1057,11 @@ def _cute_web_extract(a: dict, _r) -> str:
 
 def _cute_todo_list(a: dict, result) -> str:
     todos_arg = a.get("todos")
-    total = done = 0
+    total = done = dropped = 0
     try:
         summary = (safe_json_loads(result) or {}).get("summary", {}) if result else {}
         total, done = summary.get("total", 0), summary.get("completed", 0)
+        dropped = summary.get("cancelled", 0) or 0
     except Exception:
         pass
     if todos_arg is None:
@@ -1069,6 +1070,8 @@ def _cute_todo_list(a: dict, result) -> str:
         detail = f"update {done}/{total} ✓" if total > 0 and done > 0 else f"update {len(todos_arg)} task(s)"
     else:
         detail = f"{done}/{total} task(s)" if total > 0 and done > 0 else f"{len(todos_arg)} task(s)"
+    if dropped:
+        detail += f" · {dropped} ✗ dropped"
     return f"┊ 📋 plan      {detail}"
 
 

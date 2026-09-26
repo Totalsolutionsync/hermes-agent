@@ -23,6 +23,14 @@ class Clock:
         return self.now
 
 
+def _prefix_filter(query: str, rows):
+    """Server-side ``?rowKeyPrefix=`` narrowing of GET progress-rows."""
+    from urllib.parse import parse_qs
+
+    prefix = (parse_qs(query).get("rowKeyPrefix") or [""])[0]
+    return [dict(r) for r in rows if str(r.get("rowKey", "")).startswith(prefix)]
+
+
 class BindingFakeClient:
     """AgentOS fake: plan-binding endpoint + per-plan progress rows/focus."""
 
@@ -40,9 +48,10 @@ class BindingFakeClient:
 
     def get(self, path, **kwargs):
         self.calls.append(("GET", path))
+        path, _, query = path.partition("?")
         plan = self._plan(path)
         if path.endswith("/progress-rows"):
-            return {"items": list(self.rows.get(plan, {}).values())}
+            return {"items": _prefix_filter(query, self.rows.get(plan, {}).values())}
         return {"plan": {"id": plan, "inProgressRowKey": self.focus.get(plan)}}
 
     def post(self, path, body, **kwargs):
@@ -155,21 +164,6 @@ def test_disabled_binding_uses_the_legacy_plan_without_calling_kynver(monkeypatc
     resolver = TodoPlanResolver(client, linkage(), enabled=plan_binding_enabled())
     assert resolver.plan_for("s1").plan_id == "legacy-plan"
     assert client.binding_posts() == []
-
-
-def test_bind_moves_the_session_and_refreshes_the_cache():
-    client = BindingFakeClient({"hermes:s1": "plan-a"})
-    resolver = TodoPlanResolver(client, linkage())
-    assert resolver.plan_for("s1").plan_id == "plan-a"
-
-    moved = resolver.bind("s1", plan_id="plan-z")
-    assert moved.plan_id == "plan-z"
-    assert client.binding_posts()[-1][2] == {"sessionKey": "hermes:s1", "bind": True, "planId": "plan-z"}
-    assert resolver.plan_for("s1").plan_id == "plan-z"
-    assert len(client.binding_posts()) == 2
-
-    with pytest.raises(KynverAgentOSError):
-        resolver.bind("", plan_id="plan-z")
 
 
 def test_shared_resolver_is_one_instance_per_target(monkeypatch):

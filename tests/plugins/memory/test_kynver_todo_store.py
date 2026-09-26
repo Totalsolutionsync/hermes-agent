@@ -12,6 +12,14 @@ from plugins.memory.kynver.pre_transition import PreTransitionError
 from plugins.memory.kynver.todo_store import KynverTodoStore
 
 
+def _prefix_filter(query: str, rows):
+    """Server-side ``?rowKeyPrefix=`` narrowing of GET progress-rows."""
+    from urllib.parse import parse_qs
+
+    prefix = (parse_qs(query).get("rowKeyPrefix") or [""])[0]
+    return [dict(r) for r in rows if str(r.get("rowKey", "")).startswith(prefix)]
+
+
 class PlanProgressFakeClient:
     def __init__(self):
         self.rows: dict[str, dict] = {}
@@ -21,8 +29,9 @@ class PlanProgressFakeClient:
 
     def get(self, path, **kwargs):
         self.calls.append(("GET", path))
+        path, _, query = path.partition("?")
         if path.endswith("/progress-rows"):
-            return {"items": list(self.rows.values())}
+            return {"items": _prefix_filter(query, self.rows.values())}
         if "/plans/" in path and not path.endswith("progress-rows"):
             return {"plan": {"id": "plan-1", "inProgressRowKey": self.focus_key}}
         return {}

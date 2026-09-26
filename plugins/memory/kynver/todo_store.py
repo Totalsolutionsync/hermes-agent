@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from tools.todo_tool import BaseTodoStore, TodoStore
 
 from .agentos_bridge import KynverAgentOSClient, KynverAgentOSError
 from .operating_config import OperatingLinkage, load_operating_linkage
-from .plan_binding import TodoPlanResolver
+from .plan_binding import PROMOTE_MIN_ITEMS, TodoPlanResolver
 from .plan_progress import (
     inspect_todo_write,
     project_todo_write,
@@ -38,7 +39,11 @@ class KynverTodoStore(BaseTodoStore):
 
     With a ``plan_resolver`` each scope's rows go to the plan Kynver binds that session to
     (``plan_binding.TodoPlanResolver``); without one, to the fixed ``linkage.plan_id``
-    (legacy ``KYNVER_PLAN_ID``)."""
+    (legacy ``KYNVER_PLAN_ID``). A 1–2 item list stays on the Inbox; the write that takes an
+    Inbox-bound list to ``PROMOTE_MIN_ITEMS`` promotes it to its own plan first.
+
+    Reads return the session's working set, never its history: see
+    ``plan_progress.reconcile_todos_from_kynver``."""
 
     def __init__(
         self,
@@ -76,6 +81,27 @@ class KynverTodoStore(BaseTodoStore):
         if self._plan_resolver is None:
             return self._linkage
         return self._plan_resolver.linkage_for(scope)
+
+    def _promoted_linkage(
+        self, scope: str, items: List[Dict[str, str]], linkage: OperatingLinkage
+    ) -> OperatingLinkage:
+        """``linkage`` moved to the session's own plan when this list has outgrown the Inbox.
+        A failed promotion leaves the list on the Inbox; the next write asks again."""
+        if self._plan_resolver is None or len(items) < PROMOTE_MIN_ITEMS:
+            return linkage
+        title = next(
+            (i["content"] for i in items if i.get("status") != "cancelled" and not i.get("parent")),
+            items[0]["content"],
+        )
+        try:
+            plan = self._plan_resolver.promote(scope, title=title)
+        except KynverAgentOSError as exc:
+            logger.warning("Kynver todo: could not move a %d-item list off the Inbox: %s", len(items), exc)
+            return linkage
+        if plan is None:
+            return linkage
+        logger.info("Kynver todo: %d-item list moved from the Inbox to plan %s", len(items), plan.plan_id)
+        return replace(linkage, plan_id=plan.plan_id)
 
     def plan_for_current_scope(self) -> Optional[str]:
         """Plan id the current session's todos land on (None when local-only)."""
@@ -237,6 +263,7 @@ class KynverTodoStore(BaseTodoStore):
             linkage = self._linkage_for(scope)
             if not linkage.plan_id:
                 return local_items
+            linkage = self._promoted_linkage(scope, local_items, linkage)
             blocked = inspect_todo_write(
                 self._client,
                 linkage,
