@@ -60,6 +60,51 @@ def session_todo_scope(agent: Any) -> Optional[str]:
     return scope
 
 
+def scope_for_session_id(agent: Any, session_id: str) -> Optional[str]:
+    """Todo scope of any session id (its compression-lineage root), e.g. the chat that launched
+    a worker, so a cron can pick up that chat's list with ``plan="session:<id>"``."""
+    session_id = (session_id or "").strip()
+    if not session_id:
+        return None
+    lineage_of = getattr(getattr(agent, "_session_db", None), "get_compression_lineage", None)
+    root = session_id
+    if callable(lineage_of):
+        try:
+            lineage = list(lineage_of(session_id) or [])
+        except Exception as exc:
+            logger.debug("Kynver todo scope: lineage lookup failed for %s: %s", session_id, exc)
+            lineage = []
+        if lineage:
+            root = str(lineage[0])
+    return normalize_todo_scope(root)
+
+
+_PLATFORM_LABELS = {"telegram": "Telegram", "discord": "Discord", "slack": "Slack", "cli": "CLI",
+                    "cron": "Hermes cron", "whatsapp": "WhatsApp", "signal": "Signal"}
+
+
+def todo_session_label(agent: Any) -> Optional[str]:
+    """How this chat's rows are labelled in Kynver: "Telegram · Will H", "Hermes cron · <title>"."""
+    platform = str(getattr(agent, "platform", "") or "").strip().lower()
+    where = _PLATFORM_LABELS.get(platform, platform.title() if platform else "Hermes")
+    who = getattr(agent, "_chat_name", None) or getattr(agent, "_user_name", None)
+    if not who:
+        title_of = getattr(getattr(agent, "_session_db", None), "get_session_title", None)
+        session_id = getattr(agent, "session_id", None)
+        if callable(title_of) and session_id:
+            try:
+                who = title_of(session_id)
+            except Exception:
+                who = None
+    who = " ".join(str(who).split())[:80] if who else ""
+    return f"{where} · {who}" if who else where
+
+
+def todo_actor_source(agent: Any) -> str:
+    """``hermes-cron`` for scheduled runs (worker reviews tick items they did not create)."""
+    return "hermes-cron" if str(getattr(agent, "platform", "") or "").lower() == "cron" else "hermes-chat"
+
+
 def known_session_scope(session_id: str) -> Optional[str]:
     """Scope last resolved for ``session_id``; the id itself before any resolution."""
     session_id = (session_id or "").strip()
@@ -104,12 +149,15 @@ def configure_agent(
         allow_fallback=fallback_ok,
         scope=lambda: session_todo_scope(agent),
         plan_resolver=shared_plan_resolver(client, linkage),
+        label=lambda: todo_session_label(agent),
+        actor_source=todo_actor_source(agent),
+        scope_for_session=lambda session_id: scope_for_session_id(agent, session_id),
     )
     agent._todo_store_provider = "kynver"
     agent._kynver_degraded = bool(getattr(agent._todo_store, "degraded", False))
 
     logger.info(
-        "Kynver todo store active (plan: %s; in_progress uses progress-focus, not running)",
+        "Kynver todo store active (plan: %s; one /todos/session call per read or write)",
         "per-session binding" + (f", legacy fallback {linkage.plan_id}" if linkage.plan_id else "")
         if plan_binding_enabled()
         else f"fixed {linkage.plan_id or '(none)'}",
@@ -125,9 +173,9 @@ def get_prompt_blocks(agent: Any) -> List[str]:
     provider = getattr(agent, "_todo_store_provider", "local")
     if provider == "kynver" and getattr(agent, "_kynver_active", False):
         blocks.append(
-            "[Kynver: session todos sync to AgentOS plan progress; "
-            "in_progress is current focus, not harness running lease. "
-            "1–2 step lists stay in the Inbox; a list of 3+ gets its own plan automatically — "
-            "never link plans by hand. Mark dropped items cancelled (✗), not completed (✓)]"
+            "[Kynver: your todo list is a live view of shared Kynver plan rows — Will, other "
+            "chats, crons and Kynver agents may tick items too (shown as 'by …'). Several items "
+            "may be in progress at once. 1–2 item lists stay in the Inbox; 3+ get their own plan "
+            "automatically. Mark dropped items cancelled (✗), not completed (✓)]"
         )
     return blocks

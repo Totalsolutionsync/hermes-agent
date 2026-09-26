@@ -35,22 +35,28 @@ such as `todo`, `memory`, `delegate_task`, and `session_search`. Kynver uses it
 to mirror todo state and audit tool events without adding Kynver-specific code
 to those tools.
 
-Each session's todo list lands on the AgentOS plan its work belongs to. The todo
-store resolves the plan per session through `POST /api/agent-os/{slug}/todos/plan-binding`
-(`sessionKey = hermes:<compression-lineage root>`, hint `taskId = KYNVER_TASK_ID`).
-Kynver persists the binding and uses this order: explicit bind → session binding → the
-task's plan → the workspace Inbox plan. Compression and restarts keep the same plan. Rows
-are keyed `hermes-todo:<scope>:<id>`. `KYNVER_PLAN_ID` is only a legacy fallback: it is
-used when the binding route does not exist (an older Kynver answers 404/405) or when
-`KYNVER_TODO_PLAN_BINDING=off`. Transient binding failures degrade to the local todo
-cache and retry, so they never redirect rows to the legacy plan.
+Kynver plans are the single source of truth for todo lists. A Hermes chat's list is a
+live view of shared plan rows: another chat, a Hermes cron, a Kynver agent or the owner in
+the Kynver UI may tick an item, and the chat sees the change (with who made it) on its
+next read. Every todo read or write is **one** call:
+`POST /api/agent-os/{slug}/todos/session` with `sessionKey = hermes:<compression-lineage
+root>`, the chat's `label` ("Telegram · Will H"), an `actor` (`hermes-chat`, or
+`hermes-cron` for scheduled runs) and optionally `adopt` (pick up a handed-over plan by id,
+title, Kynver link, or `session:<key>` for another chat's list). Kynver resolves the plan
+(session binding → task's plan → workspace Inbox; a list reaching 3 items gets its own
+plan), applies the write and returns the list. Several items may be in progress at once.
+Rows are keyed `hermes-todo:<scope>:<id>`; items owned by someone else come back with
+their row key as id.
 
-Forge also registers plugin hooks on `todo`:
+When Kynver is unreachable (network, 5xx, 429) the chat's local cache answers, the result
+says so (`sync.via = "local cache"` + reason), and writes replay when it is back. A Kynver
+without the endpoint (404/405) gets the legacy projection
+(`/todos/plan-binding` + `/plans/:id/progress-rows` + `/progress-focus`, 6–8 calls per
+write); `KYNVER_PLAN_ID` is only a fallback for a Kynver without per-session binding.
+See `plugins/memory/kynver/TODO_SCOPE.md` for the rules.
 
-- `pre_tool_call` — project Hermes todos to `/plans/:id/progress-rows` and
-  `/progress-focus` (`in_progress` focus ≠ harness executor lease `running`).
-- `transform_tool_result` — read-back reconciliation from Kynver into the todo
-  list the model sees (also wired for agent-loop tools in `tool_executor.py`).
+Forge registers no `pre_tool_call` todo guard any more: Kynver enforces transitions inside
+the one call (the guard used to add 1–2 Kynver round trips per write).
 
 When `KYNVER_API_KEY` (and slug) are present, operating hooks default **on** unless
 `KYNVER_OPERATING_TOOLS=false`. Forge logs an info line at plugin registration when

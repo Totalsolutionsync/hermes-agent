@@ -65,6 +65,8 @@ class _Handler(BaseHTTPRequestHandler):
         if self.server.down:
             return self._reply(503, {"error": "unavailable"})
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if self.path.endswith("/todos/session"):  # an older Kynver: legacy projection path
+            return self._reply(404, {"error": "Not found"})
         self.server.writes += 1
         if self.path == f"{_PLAN}/progress-rows":
             for row in body["rows"]:
