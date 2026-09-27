@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import OrderedDict
 from typing import Any, List, Mapping, Optional
@@ -81,23 +82,68 @@ def scope_for_session_id(agent: Any, session_id: str) -> Optional[str]:
 
 _PLATFORM_LABELS = {"telegram": "Telegram", "discord": "Discord", "slack": "Slack", "cli": "CLI",
                     "cron": "Hermes cron", "whatsapp": "WhatsApp", "signal": "Signal"}
+# Surfaces without a person or chat to name: the bare platform is the whole label.
+_UNNAMED_PLATFORMS = frozenset({"", "cli", "cron", "hermes", "local"})
+
+
+def _clean_name(value: Any) -> str:
+    return " ".join(str(value).split())[:80] if value else ""
+
+
+def _stored_chat_name(agent: Any, session_id: str) -> str:
+    """The chat/user name the gateway stored on the session row (``display_name``, else the
+    origin's ``chat_name`` / ``user_name``), for agents built without the live source's name."""
+    get_session = getattr(getattr(agent, "_session_db", None), "get_session", None)
+    if not callable(get_session):
+        return ""
+    try:
+        row = get_session(session_id) or {}
+    except Exception as exc:
+        logger.debug("Kynver todo label: session lookup failed for %s: %s", session_id, exc)
+        return ""
+    name = _clean_name(row.get("display_name"))
+    if name:
+        return name
+    try:
+        origin = json.loads(row.get("origin_json") or "null") or {}
+    except (TypeError, ValueError):
+        origin = {}
+    if isinstance(origin, dict):
+        return _clean_name(origin.get("chat_name") or origin.get("user_name"))
+    return ""
+
+
+def _session_title(agent: Any, session_id: str) -> str:
+    title_of = getattr(getattr(agent, "_session_db", None), "get_session_title", None)
+    if not callable(title_of):
+        return ""
+    try:
+        return _clean_name(title_of(session_id))
+    except Exception:
+        return ""
 
 
 def todo_session_label(agent: Any) -> Optional[str]:
-    """How this chat's rows are labelled in Kynver: "Telegram · Will H", "Hermes cron · <title>"."""
+    """How this chat's rows are labelled in Kynver: "Telegram · Will H", "Hermes cron · <title>".
+
+    The name comes from the live source, else the session row the gateway stored, else the
+    session title. A chat platform whose name is still unknown sends no label (Kynver keeps the
+    list's existing name) — never a bare "Telegram" that would rename "Telegram · Will H"."""
     platform = str(getattr(agent, "platform", "") or "").strip().lower()
     where = _PLATFORM_LABELS.get(platform, platform.title() if platform else "Hermes")
-    who = getattr(agent, "_chat_name", None) or getattr(agent, "_user_name", None)
-    if not who:
-        title_of = getattr(getattr(agent, "_session_db", None), "get_session_title", None)
-        session_id = getattr(agent, "session_id", None)
-        if callable(title_of) and session_id:
-            try:
-                who = title_of(session_id)
-            except Exception:
-                who = None
-    who = " ".join(str(who).split())[:80] if who else ""
-    return f"{where} · {who}" if who else where
+    who = _clean_name(getattr(agent, "_chat_name", None) or getattr(agent, "_user_name", None))
+    session_id = str(getattr(agent, "session_id", "") or "").strip()
+    if not who and session_id:
+        cached = getattr(agent, "_kynver_todo_label_name", None)
+        if cached and cached[0] == session_id:
+            who = cached[1]
+        else:
+            who = _stored_chat_name(agent, session_id) or _session_title(agent, session_id)
+            if who:  # only a hit is cached: the row may gain its name later in the turn
+                agent._kynver_todo_label_name = (session_id, who)
+    if who:
+        return f"{where} · {who}"
+    return where if platform in _UNNAMED_PLATFORMS else None
 
 
 def todo_actor_source(agent: Any) -> str:
