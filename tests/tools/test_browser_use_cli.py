@@ -255,6 +255,54 @@ class TestVaultSupervisorAttach:
         ]
 
 
+class TestExternalConnectionSafety:
+    def test_connection_freeze_refuses_before_route_or_cli(self, tmp_path, monkeypatch):
+        """An operator freeze is a hard no-dial gate, including for already-running sessions."""
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"browser": {"backend": "browser-use", "connection_freeze": True}},
+        )
+        cli = _fake_cli(tmp_path, 'cat > /dev/null\necho should-not-run\n')
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+        routed = []
+        monkeypatch.setattr(
+            bu_cli,
+            "_route_backend",
+            lambda *args, **kwargs: routed.append((args, kwargs)) or None,
+        )
+
+        raw = bu_cli.browser_exec("print(1)", task_id="frozen")
+        assert isinstance(raw, str)
+        result = json.loads(raw)
+
+        assert result.get("success") is not True
+        assert "connection freeze" in result["error"].lower()
+        assert routed == []
+
+    def test_named_session_refuses_shared_cdp_before_daemon_spawn(self, tmp_path, monkeypatch):
+        """A named daemon must never open another socket to an operator-supplied shared Chrome."""
+        monkeypatch.setattr(
+            "hermes_cli.config.read_raw_config",
+            lambda: {"browser": {"backend": "browser-use", "connection_freeze": False}},
+        )
+        cli = _fake_cli(tmp_path, 'cat > /dev/null\necho should-not-run\n')
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+
+        def shared_route(env, *_args, **_kwargs):
+            env["BU_CDP_WS"] = "ws://127.0.0.1:9222/devtools/browser/shared"
+            return None
+
+        monkeypatch.setattr(bu_cli, "_route_backend", shared_route)
+
+        raw = bu_cli.browser_exec("print(1)", session="isolated-worker", task_id="named-shared")
+        assert isinstance(raw, str)
+        result = json.loads(raw)
+
+        assert result.get("success") is not True
+        assert "named sessions" in result["error"].lower()
+        assert "shared cdp" in result["error"].lower()
+
+
 class TestVaultEgressRedaction:
     def test_exec_redacts_registered_vault_secret_from_stdout_and_stderr(self, tmp_path, monkeypatch):
         """A browser_exec page read must not return a vault-filled value to model history."""
@@ -587,8 +635,7 @@ class TestBackendCdpResolution:
 
 
 class TestOwnTabPreamble:
-    """Named sessions on SHARED browsers (a /browser connect CDP override) get the own-tab preamble
-    prepended; private per-name browsers (packaged Chromium, provider) and unnamed sessions do not."""
+    """Named sessions are private per-name browsers; shared external CDP refuses names entirely."""
 
     def _run(self, tmp_path, monkeypatch, *, session="", private=False, provider=False, shared_cdp=""):
 
@@ -606,12 +653,11 @@ class TestOwnTabPreamble:
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
         return json.loads(bu_cli.browser_exec("print('payload')", session=session))
 
-    def test_named_shared_browser_gets_preamble(self, tmp_path, monkeypatch):
+    def test_named_shared_browser_is_rejected_before_daemon_spawn(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, monkeypatch, session="r7k2", shared_cdp="http://127.0.0.1:9222")
-        assert result["success"] is True
-        assert "_hermes_ensure_own_tab" in result["output"]
-        # model code still present, after the preamble
-        assert result["output"].index("_hermes_ensure_own_tab") < result["output"].index("print('payload')")
+        assert result.get("success") is not True
+        assert "named sessions" in result["error"].lower()
+        assert "shared cdp" in result["error"].lower()
 
     def test_named_packaged_chromium_skips_preamble(self, tmp_path, monkeypatch):
         """Each named session launches its own packaged Chromium — nothing to share a tab with."""

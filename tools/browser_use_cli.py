@@ -615,6 +615,14 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     if not code or not code.strip():
         return tool_error("No code provided. Pass Python that uses the pre-imported helpers, e.g. new_tab(\"https://example.com\") then print(page_info()).")
 
+    # Operator containment must run before CLI discovery or route resolution:
+    # either step may eventually create a consent-gated local CDP transport.
+    if is_truthy_value(_read_browser_cfg().get("connection_freeze"), default=False):
+        return tool_error(
+            "Browser connection freeze is active; no browser transport was opened. "
+            "An operator must clear browser.connection_freeze before browser work can resume."
+        )
+
     blocked = _blocked_url_in_code(code)
     if blocked:
         return tool_error(blocked)
@@ -639,6 +647,12 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     # SHARED browser (/browser connect CDP override): pin each named session to its own tab (see
     # _OWN_TAB_PREAMBLE). Private per-name browsers skip this — nothing to collide with.
     private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)  # always pop: never exported to the CLI
+    if session and not private_browser and _has_cdp_env(env):
+        return tool_error(
+            "Named sessions are disabled for shared CDP connections because each name would spawn "
+            "another daemon and consent-gated browser connection. Omit session to reuse the single "
+            "approved default transport."
+        )
     if session and not private_browser:
         code = _OWN_TAB_PREAMBLE + code
 

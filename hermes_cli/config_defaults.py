@@ -404,6 +404,9 @@ DEFAULT_CONFIG = {
         # browser_exec tool driving the Browser Use CLI over any CDP backend (local Chrome, cloud);
         # "off" = force the built-in browser_navigate/browser_click/... tools.
         "backend": "",
+        # Emergency operator gate. Checked before browser route resolution or CLI launch so a
+        # consent-gated external Chrome cannot receive a fresh connection while containment is active.
+        "connection_freeze": False,
         "inactivity_timeout": 120,
         "command_timeout": 30,  # seconds per browser command (screenshot, navigate, etc.)
         "snapshot_threshold": 15000,  # max chars before snapshot truncate-and-store (min 1000)
