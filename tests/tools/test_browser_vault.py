@@ -467,6 +467,48 @@ class TestBrowserVaultTools:
         assert out.get("filled_fields", 0) == 0
         assert "s3cret-pw" not in raw
 
+    def test_secret_eval_lazily_starts_browser_exec_endpoint(self, monkeypatch):
+        """A secret operation may open the second socket, but ordinary browser_exec never does."""
+        from tools import browser_supervisor, browser_vault_tool
+
+        events = []
+
+        class _Supervisor:
+            def evaluate_runtime(self, expression):
+                events.append(("evaluate", expression))
+                return {"ok": True, "result": "filled"}
+
+        class _Registry:
+            def get(self, task_id):
+                events.append(("get", task_id))
+                return None
+
+            def get_lazy_endpoint(self, task_id):
+                events.append(("endpoint", task_id))
+                return True, "ws://127.0.0.1:9222/devtools/browser/approved"
+
+            def get_or_start(self, task_id, cdp_url, **kwargs):
+                events.append(("start", task_id, cdp_url, kwargs["reconnect_on_drop"]))
+                return _Supervisor()
+
+        monkeypatch.setattr(browser_supervisor, "SUPERVISOR_REGISTRY", _Registry())
+        monkeypatch.setattr("tools.browser_tool_cdp._resolve_cdp_override", lambda url: url)
+        monkeypatch.setattr("tools.browser_tool_cdp._get_dialog_policy_config", lambda: ("auto-dismiss", 5.0))
+        monkeypatch.setattr(
+            "tools.browser_tool_session._run_browser_command",
+            lambda *args, **kwargs: pytest.fail("lazy browser_exec endpoint must not use argv/agent-browser fallback"),
+        )
+
+        result = browser_vault_tool._eval_js_secret("vault-task", "fill_secret()")
+
+        assert result == {"success": True, "result": "filled"}
+        assert events == [
+            ("get", "vault-task"),
+            ("endpoint", "vault-task"),
+            ("start", "vault-task", "ws://127.0.0.1:9222/devtools/browser/approved", False),
+            ("evaluate", "fill_secret()"),
+        ]
+
     def test_secret_eval_fails_closed_without_supervisor(self, store):
         """P1-1: the secret-bearing eval NEVER falls back to the argv path."""
         from tools import browser_vault_tool

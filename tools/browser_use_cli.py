@@ -516,21 +516,19 @@ def _resolve_real_profile_cdp(env: dict, force_local: bool) -> Optional[str]:
     return err or None
 
 
-def _attach_vault_supervisor(env: dict, task_id: Optional[str]) -> None:
-    """Attach the per-task CDP supervisor to the browser this exec drives so ``browser_vault_fill`` has
-    a secret-capable WebSocket (never argv) into the SAME browser. Only CDP-routed backends expose an
-    endpoint; BU direct-cloud (BU_AUTOSPAWN) does not, and the vault tools report ``supervisor_required``."""
+def _bind_lazy_vault_supervisor(env: dict, task_id: Optional[str]) -> None:
+    """Remember this exec's CDP route without opening another WebSocket.
+
+    Browser Use's harness daemon owns the normal persistent connection.  A
+    vault operation starts the separate model-blind supervisor lazily; direct
+    cloud routes have no endpoint and remain fail-closed.
+    """
     cdp = env.get("BU_CDP_WS") or env.get("BU_CDP_URL")
-    if not cdp:
-        return
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY
-        from tools.browser_tool_cdp import _get_dialog_policy_config, _resolve_cdp_override
-        policy, timeout_s = _get_dialog_policy_config()
-        SUPERVISOR_REGISTRY.get_or_start(task_id=task_id or "default", cdp_url=_resolve_cdp_override(cdp),
-                                         dialog_policy=policy, dialog_timeout_s=timeout_s)
+        SUPERVISOR_REGISTRY.set_lazy_endpoint(task_id or "default", cdp)
     except Exception as exc:
-        logger.debug("browser_exec: CDP supervisor attach failed (non-fatal): %s", exc)
+        logger.debug("browser_exec: lazy CDP supervisor bind failed (non-fatal): %s", exc)
 
 
 def _route_backend(env: dict, session: str, task_id: Optional[str], local: bool) -> Optional[str]:
@@ -657,7 +655,7 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     started = time.time()
 
     def dispatch() -> Dict[str, Any]:
-        _attach_vault_supervisor(env, task_id)
+        _bind_lazy_vault_supervisor(env, task_id)
         try:
             return {"proc": _run_cli_killing_process_group(cmd, code, env, timeout)}
         except subprocess.TimeoutExpired:

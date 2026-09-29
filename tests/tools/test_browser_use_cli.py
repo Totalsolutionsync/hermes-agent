@@ -50,18 +50,20 @@ def _fake_managed_chromium(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fake_supervisor_registry(monkeypatch):
-    """browser_exec attaches the vault supervisor to the resolved CDP endpoint; the fake endpoint above is
-    not a real browser, so record the attach instead of opening a WebSocket (15 s start timeout)."""
+    """Record lazy endpoint binding and reject any eager WebSocket start."""
     from tools import browser_supervisor
 
-    attached = []
+    events = []
 
     class _Registry:
+        def set_lazy_endpoint(self, task_id, cdp_url):
+            events.append(("bind", task_id, cdp_url))
+
         def get_or_start(self, task_id, cdp_url, **kw):
-            attached.append((task_id, cdp_url))
+            events.append(("start", task_id, cdp_url))
 
     monkeypatch.setattr(browser_supervisor, "SUPERVISOR_REGISTRY", _Registry())
-    return attached
+    return events
 
 
 def _fake_cli(tmp_path, body):
@@ -237,18 +239,20 @@ class TestToolSurfaceSwap:
 
 
 class TestVaultSupervisorAttach:
-    def test_exec_attaches_supervisor_to_the_browser_it_drives(self, tmp_path, monkeypatch, _fake_supervisor_registry):
-        """browser_vault_fill injects secrets only over the supervisor's CDP WebSocket. Without this attach the
-        default (Browser Use) backend had no supervisor at all and every fill failed with supervisor_required."""
+    def test_repeated_exec_only_binds_lazy_endpoint(self, tmp_path, monkeypatch, _fake_supervisor_registry):
+        """Ordinary calls reuse the harness transport and never open the vault's second CDP WebSocket."""
         monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {"browser": {"backend": "browser-use"}})
         cli = _fake_cli(tmp_path, 'cat > /dev/null\necho ok\n')
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
-        monkeypatch.setattr("tools.browser_tool_cdp._resolve_cdp_override", lambda url: url)
 
-        result = json.loads(bu_cli.browser_exec("print(1)", task_id="t-vault"))
+        first = json.loads(bu_cli.browser_exec("print(1)", task_id="t-vault"))
+        second = json.loads(bu_cli.browser_exec("print(2)", task_id="t-vault"))
 
-        assert result["success"] is True
-        assert _fake_supervisor_registry == [("t-vault", "ws://127.0.0.1:47000/devtools/browser/t-vault")]
+        assert first["success"] is second["success"] is True
+        assert _fake_supervisor_registry == [
+            ("bind", "t-vault", "ws://127.0.0.1:47000/devtools/browser/t-vault"),
+            ("bind", "t-vault", "ws://127.0.0.1:47000/devtools/browser/t-vault"),
+        ]
 
 
 class TestVaultEgressRedaction:

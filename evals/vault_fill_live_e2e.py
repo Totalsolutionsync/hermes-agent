@@ -1,9 +1,10 @@
 """Live E2E: vault fill through the REAL browser_exec path (Browser Use CLI + Hermes' packaged Chromium).
 
 Proves problem (1) of the #106480 re-review is fixed: on the default browser backend the login page lives in
-a tab browser_exec opened, the supervisor is attached by browser_exec itself, browser_vault_fill focuses the
-tab on the bound origin and injects the password over the supervisor's CDP WebSocket, and the secret is absent
-from every model-facing result. Also exercises a payment fill (confirm gate, card fields, decline = no write).
+a tab browser_exec opened, ordinary browser_exec calls do not open a competing supervisor socket,
+browser_vault_fill attaches it lazily, focuses the tab on the bound origin, injects the password over that
+model-blind WebSocket, and keeps the secret absent from every model-facing result. Also exercises a payment
+fill (confirm gate, card fields, decline = no write).
 
 Run: HERMES_E2E_BROWSER=1 <venv>/bin/python evals/vault_fill_live_e2e.py
 """
@@ -66,9 +67,7 @@ def main() -> int:
         _exec(f"new_tab({origin + '/login'!r}); wait_for_load()")
         _exec(f"new_tab({origin + '/checkout'!r}); wait_for_load(); print(page_info()['url'])")
 
-        sup = SUPERVISOR_REGISTRY.get(TASK)
-        assert sup is not None, "browser_exec did not attach a supervisor for its task (problem 1 regressed)"
-        print("supervisor attached by browser_exec; its page before fill:", sup.evaluate_runtime("location.href")["result"])
+        assert SUPERVISOR_REGISTRY.get(TASK) is None, "ordinary browser_exec opened a competing CDP socket"
 
         from tools import browser_vault_tool as bvt
         from tools.browser_cdp_tool import _redact_cdp_output
@@ -85,6 +84,8 @@ def main() -> int:
         print("login fill:", out)
         assert out["success"] and out["filled_fields"] == 1, out
         assert "pw-E2E-8842" not in raw
+        sup = SUPERVISOR_REGISTRY.get(TASK)
+        assert sup is not None, "vault fill did not lazily attach its model-blind supervisor"
         dom = sup.evaluate_runtime("location.pathname + ' ' + document.querySelector('input[name=pw]').value")
         assert dom["result"] == "/login pw-E2E-8842", dom  # raw supervisor read (not a model surface): the write landed in the login tab
         assert "pw-E2E-8842" not in json.dumps(_redact_cdp_output({"result": {"value": dom["result"]}}))

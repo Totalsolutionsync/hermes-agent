@@ -88,11 +88,11 @@ def _eval_js(task_id: str, expression: str) -> Dict[str, Any]:
 
 
 def _ensure_supervisor(task_id: str):
-    """The supervisor for ``task_id``, attaching one on demand for a LOCAL built-in browser session.
+    """The supervisor for ``task_id``, attaching one only when a vault operation needs it.
 
-    Cloud/CDP-override sessions and browser_exec attach their supervisor when the session is created;
-    a local agent-browser ``--session`` has no ``cdp_url`` of its own, so nothing did. Ask the daemon
-    for the packaged Chromium's endpoint (``get cdp-url``: same daemon, same reaper) and attach.
+    Browser Exec records its endpoint without connecting; resolve and attach it here. A local
+    agent-browser ``--session`` has no ``cdp_url`` of its own, so ask that daemon for the packaged
+    Chromium endpoint (``get cdp-url``: same daemon, same reaper) and attach.
     Returns None when no endpoint is reachable; the fill then refuses rather than touching argv."""
     from tools.browser_supervisor import SUPERVISOR_REGISTRY
 
@@ -103,14 +103,19 @@ def _ensure_supervisor(task_id: str):
     from tools.browser_tool_cdp import _get_dialog_policy_config, _resolve_cdp_override
     from tools.browser_tool_session import _run_browser_command
 
-    res = _run_browser_command(_last_session_key(task_id), "get", ["cdp-url"])
-    cdp_url = str(((res or {}).get("data") or {}).get("cdpUrl") or "") if (res or {}).get("success") else ""
+    browser_exec_bound, cdp_url = SUPERVISOR_REGISTRY.get_lazy_endpoint(task_id)
+    if browser_exec_bound and not cdp_url:
+        return None
+    if not browser_exec_bound:
+        res = _run_browser_command(_last_session_key(task_id), "get", ["cdp-url"])
+        cdp_url = str(((res or {}).get("data") or {}).get("cdpUrl") or "") if (res or {}).get("success") else ""
     if not cdp_url:
         return None
     policy, timeout_s = _get_dialog_policy_config()
     try:
         return SUPERVISOR_REGISTRY.get_or_start(task_id=task_id, cdp_url=_resolve_cdp_override(cdp_url),
-                                                dialog_policy=policy, dialog_timeout_s=timeout_s)
+                                                dialog_policy=policy, dialog_timeout_s=timeout_s,
+                                                reconnect_on_drop=not browser_exec_bound)
     except Exception as exc:
         logger.debug("vault fill: supervisor attach to local session failed (%s)", exc)
         return None

@@ -70,14 +70,20 @@ frozen snapshot without awaiting.
 
 - **Start:** `SupervisorRegistry.get_or_start(task_id, cdp_url)` — called by
   `browser_navigate`, Browserbase session create, `/browser connect`.
-  Idempotent.
+  Idempotent. Browser Use is different: `browser_exec` only records its routed
+  endpoint with `set_lazy_endpoint`; a vault operation starts the supervisor
+  when it needs the model-blind secret channel. Ordinary Browser Use actions
+  therefore keep using the harness daemon's one persistent CDP connection. If
+  that lazy secret channel drops, it unregisters without reconnecting; the next
+  vault operation may make one fresh attempt instead of an autonomous prompt loop.
 - **Stop:** session teardown or `/browser disconnect`. Cancels the asyncio
   task, closes the WebSocket, discards state.
-- **Dropped endpoint:** after a successful attach the supervisor reconnects with
+- **Dropped endpoint:** after a successful attach a non-lazy supervisor reconnects with
   backoff (≤10 s) but gives up after `MAX_POST_ATTACH_RECONNECT_FAILURES`
   consecutive failures — one final warning, the thread exits and the registry
   entry is dropped. A dead local Chrome (its task finished) therefore never leaves
-  a retrying thread behind; the next browser call starts a fresh supervisor.
+  a retrying thread behind; the next operation that requires supervision starts a
+  fresh supervisor.
 - **Rebind:** if the CDP URL changes (user reconnects to a new Chrome), the
   old supervisor is stopped and a fresh one started — state is never reused
   across endpoints.

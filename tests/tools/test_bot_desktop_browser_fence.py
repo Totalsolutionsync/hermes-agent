@@ -54,7 +54,7 @@ def _wire_browser_exec(monkeypatch, run_cli):
     monkeypatch.setattr(cloud, "_get_cloud_provider", lambda: None)
     monkeypatch.setattr(session, "_run_browser_command", lambda *_a, **_kw: {
         "success": True, "data": {"cdpUrl": "http://127.0.0.1:9222"}})
-    monkeypatch.setattr(browser_use, "_attach_vault_supervisor", lambda *a: None)
+    monkeypatch.setattr(browser_use, "_bind_lazy_vault_supervisor", lambda *a: None)
     monkeypatch.setattr(browser_use, "_run_cli_killing_process_group", run_cli)
     return browser_use
 

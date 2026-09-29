@@ -68,11 +68,12 @@ def stub_cdp_supervisor(monkeypatch):
     created: list[SimpleNamespace] = []
 
     class _StubSupervisor:
-        def __init__(self, *, task_id, cdp_url, dialog_policy, dialog_timeout_s):
+        def __init__(self, *, task_id, cdp_url, dialog_policy, dialog_timeout_s, reconnect_on_drop):
             self.task_id = task_id
             self.cdp_url = cdp_url
             self.dialog_policy = dialog_policy
             self.dialog_timeout_s = dialog_timeout_s
+            self.reconnect_on_drop = reconnect_on_drop
             # Healthy by default — real thread, running "loop".
             hold = threading.Event()
             self._thread = threading.Thread(target=hold.wait, daemon=True)
@@ -105,10 +106,14 @@ def stub_cdp_supervisor(monkeypatch):
 def test_cache_hit_returns_same_instance_when_healthy(
     isolated_registry, stub_cdp_supervisor
 ):
-    """Sanity: healthy cached supervisor is returned without recreate."""
-    first = isolated_registry.get_or_start(task_id="t1", cdp_url="http://h/1")
-    second = isolated_registry.get_or_start(task_id="t1", cdp_url="http://h/1")
+    """A repeated Browser Use bind preserves the one healthy lazy supervisor."""
+    endpoint = "http://h/1"
+    isolated_registry.set_lazy_endpoint("t1", endpoint)
+    first = isolated_registry.get_or_start(task_id="t1", cdp_url=endpoint)
+    isolated_registry.set_lazy_endpoint("t1", endpoint)
+    second = isolated_registry.get_or_start(task_id="t1", cdp_url=endpoint)
     assert first is second
+    assert first.stop_called is False
     # Only one CDPSupervisor was ever constructed.
     assert len(stub_cdp_supervisor) == 1
     first.stop()
