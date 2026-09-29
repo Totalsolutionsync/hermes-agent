@@ -96,14 +96,14 @@ def _ensure_supervisor(task_id: str):
     Returns None when no endpoint is reachable; the fill then refuses rather than touching argv."""
     from tools.browser_supervisor import SUPERVISOR_REGISTRY
 
+    browser_exec_bound, cdp_url, lazy_binding_token = SUPERVISOR_REGISTRY.get_lazy_binding(task_id)
     supervisor = SUPERVISOR_REGISTRY.get(task_id)
     if supervisor is not None:
-        return supervisor
+        return supervisor, lazy_binding_token if browser_exec_bound else None
     from tools.browser_tool import _last_session_key
     from tools.browser_tool_cdp import _get_dialog_policy_config, _resolve_cdp_override
     from tools.browser_tool_session import _run_browser_command
 
-    browser_exec_bound, cdp_url = SUPERVISOR_REGISTRY.get_lazy_endpoint(task_id)
     if browser_exec_bound and not cdp_url:
         return None
     if not browser_exec_bound:
@@ -113,9 +113,13 @@ def _ensure_supervisor(task_id: str):
         return None
     policy, timeout_s = _get_dialog_policy_config()
     try:
-        return SUPERVISOR_REGISTRY.get_or_start(task_id=task_id, cdp_url=_resolve_cdp_override(cdp_url),
-                                                dialog_policy=policy, dialog_timeout_s=timeout_s,
-                                                reconnect_on_drop=not browser_exec_bound)
+        supervisor = SUPERVISOR_REGISTRY.get_or_start(
+            task_id=task_id, cdp_url=_resolve_cdp_override(cdp_url),
+            dialog_policy=policy, dialog_timeout_s=timeout_s,
+            reconnect_on_drop=not browser_exec_bound,
+            lazy_binding_token=lazy_binding_token,
+        )
+        return supervisor, lazy_binding_token if browser_exec_bound else None
     except Exception as exc:
         logger.debug("vault fill: supervisor attach to local session failed (%s)", exc)
         return None
@@ -131,12 +135,12 @@ def _eval_js_secret(task_id: str, expression: str) -> Dict[str, Any]:
     (``error_type='supervisor_required'``) and nothing is written.
     """
     try:
-        supervisor = _ensure_supervisor(task_id)
+        ensured = _ensure_supervisor(task_id)
     except Exception as exc:
         logger.debug("vault fill: supervisor unavailable (%s)", exc)
-        supervisor = None
+        ensured = None
 
-    if supervisor is None:
+    if ensured is None:
         return {
             "success": False,
             "error_type": "supervisor_required",
@@ -149,6 +153,8 @@ def _eval_js_secret(task_id: str, expression: str) -> Dict[str, Any]:
             ),
         }
 
+    supervisor, lazy_binding_token = ensured
+
     # Re-admit at the WRITE. The handler-level fence (_fenced_page_op) admitted before a possibly
     # human-length prompt (enter_code waits for the user's code); a takeover during that wait must
     # refuse here, before the credential lands in a page the human is now typing into. The outer
@@ -160,7 +166,13 @@ def _eval_js_secret(task_id: str, expression: str) -> Dict[str, Any]:
         except _bd_lease.HumanHasControl as exc:
             return {"success": False, "error_type": "human_has_control", "error": str(exc)}
 
-    sup = supervisor.evaluate_runtime(expression)
+    if lazy_binding_token is not None:
+        from tools.browser_supervisor import SUPERVISOR_REGISTRY
+        sup = SUPERVISOR_REGISTRY.evaluate_runtime_if_current(
+            task_id, supervisor, lazy_binding_token, expression
+        )
+    else:
+        sup = supervisor.evaluate_runtime(expression)
     if sup.get("ok"):
         return {"success": True, "result": sup.get("result")}
     return {
@@ -209,11 +221,12 @@ def _focus_bound_origin(task_id: str, origin: str, kind: str) -> Optional[str]:
     (browser_exec sessions open their own tabs, so the tab the supervisor attached to first is rarely the
     login page). Returns the origin when a tab was focused, else None (caller falls back to the current page)."""
     try:
-        supervisor = _ensure_supervisor(task_id)
+        ensured = _ensure_supervisor(task_id)
     except Exception:
-        supervisor = None
-    if supervisor is None:
+        ensured = None
+    if ensured is None:
         return None
+    supervisor, _lazy_binding_token = ensured
     focused = supervisor.focus_page(origin, accept=_TAB_PROBES.get(kind))
     return (origin or focused.get("url")) if focused.get("ok") else None
 

@@ -198,7 +198,7 @@ def test_secret_write_re_admits_after_a_takeover_during_the_code_prompt(monkeypa
             evaluated.append(expr)
             return {"ok": True, "result": "{}"}
 
-    monkeypatch.setattr(vault, "_ensure_supervisor", lambda tid: Sup())
+    monkeypatch.setattr(vault, "_ensure_supervisor", lambda tid: (Sup(), None))
     assert vault._eval_js_secret("default", "fill()")["success"] is True  # agent holds: writes
     lease.acquire("human")  # takeover while the prompt was open
     res = vault._eval_js_secret("default", "fill()")

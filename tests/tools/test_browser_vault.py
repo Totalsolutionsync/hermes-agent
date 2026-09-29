@@ -483,13 +483,17 @@ class TestBrowserVaultTools:
                 events.append(("get", task_id))
                 return None
 
-            def get_lazy_endpoint(self, task_id):
+            def get_lazy_binding(self, task_id):
                 events.append(("endpoint", task_id))
-                return True, "ws://127.0.0.1:9222/devtools/browser/approved"
+                return True, "ws://127.0.0.1:9222/devtools/browser/approved", 41
 
             def get_or_start(self, task_id, cdp_url, **kwargs):
-                events.append(("start", task_id, cdp_url, kwargs["reconnect_on_drop"]))
+                events.append(("start", task_id, cdp_url, kwargs["reconnect_on_drop"], kwargs["lazy_binding_token"]))
                 return _Supervisor()
+
+            def evaluate_runtime_if_current(self, task_id, supervisor, token, expression):
+                events.append(("guard", task_id, token))
+                return supervisor.evaluate_runtime(expression)
 
         monkeypatch.setattr(browser_supervisor, "SUPERVISOR_REGISTRY", _Registry())
         monkeypatch.setattr("tools.browser_tool_cdp._resolve_cdp_override", lambda url: url)
@@ -503,9 +507,10 @@ class TestBrowserVaultTools:
 
         assert result == {"success": True, "result": "filled"}
         assert events == [
-            ("get", "vault-task"),
             ("endpoint", "vault-task"),
-            ("start", "vault-task", "ws://127.0.0.1:9222/devtools/browser/approved", False),
+            ("get", "vault-task"),
+            ("start", "vault-task", "ws://127.0.0.1:9222/devtools/browser/approved", False, 41),
+            ("guard", "vault-task", 41),
             ("evaluate", "fill_secret()"),
         ]
 
