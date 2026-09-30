@@ -46,6 +46,7 @@ from .context import (
     relevant_items,
 )
 from .pre_transition import TODO_TOOL_NAMES, normalize_hermes_status
+from .prefetch_guard import PrefetchGuard, degraded_notice
 from .schemas import ALL_TOOL_SCHEMAS
 
 logger = logging.getLogger(__name__)
@@ -286,6 +287,7 @@ class KynverMemoryProvider(MemoryProvider):
         self._last_success = ""
         self._degraded_lock = threading.Lock()
         self._seen_memory_fingerprints: Dict[str, Dict[str, str]] = {}
+        self._prefetch_guard = PrefetchGuard()
         # tool_call_id -> annotation for memory writes the core mirror already routed, so the
         # agent-loop observer reports them instead of writing to Kynver a second time.
         self._routed_memory_calls: Dict[str, Dict[str, Any]] = {}
@@ -475,18 +477,46 @@ class KynverMemoryProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._memory_disabled or not (query or "").strip():
             return ""
+        query = query.strip()
+        guard = self._prefetch_guard
+        payload = guard.fresh(query)
+        note = ""
+        if payload is None:
+            waiting = guard.cooldown_remaining()
+            if waiting > 0:
+                payload = guard.stale(query)
+                if payload is None:
+                    return degraded_notice(f"rate-limited, retrying in about {int(waiting) + 1}s")
+                note = "Served from a recent result; Kynver is rate-limited right now."
+            else:
+                try:
+                    payload = self._require_client().get(
+                        memory_search_path(
+                            q=query,
+                            k=DEFAULT_SEARCH_LIMIT,
+                            view="full",
+                            purpose="explicit_recall",
+                            surface="operator",
+                        ),
+                        timeout=self._client_timeout,
+                    )
+                except Exception as exc:
+                    self._mark_degraded("memory.prefetch", exc)
+                    guard.note_failure(exc)
+                    payload = guard.stale(query)
+                    if payload is None:
+                        waiting = guard.cooldown_remaining()
+                        reason = (
+                            f"rate-limited, retrying in about {int(waiting) + 1}s"
+                            if waiting > 0
+                            else "Kynver could not be reached"
+                        )
+                        return degraded_notice(reason)
+                    note = "Served from a recent result; Kynver could not be reached just now."
+                else:
+                    self._mark_success("memory.prefetch")
+                    guard.store(query, payload)
         try:
-            payload = self._require_client().get(
-                memory_search_path(
-                    q=query.strip(),
-                    k=DEFAULT_SEARCH_LIMIT,
-                    view="full",
-                    purpose="explicit_recall",
-                    surface="operator",
-                ),
-                timeout=self._client_timeout,
-            )
-            self._mark_success("memory.prefetch")
             settings = load_context_settings()
             scope = session_id or self._session_id or "default"
             seen = self._seen_memory_fingerprints.setdefault(scope, {})
@@ -508,6 +538,8 @@ class KynverMemoryProvider(MemoryProvider):
                 key = item_key(item)
                 if key and key in shown_keys:
                     seen[key] = item_fingerprint(item)
+            if note and fitted.markdown:
+                return f"{fitted.markdown}\n_{note}_"
             return fitted.markdown
         except Exception as exc:
             self._mark_degraded("memory.prefetch", exc)
