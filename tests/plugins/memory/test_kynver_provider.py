@@ -68,7 +68,7 @@ def test_explicit_memory_search_request_contract_preserves_ambient_prefetch(k):
 
     client = FakeClient()
     provider = KynverMemoryProvider(client=client)
-    path = f"/memory?q=invoice+history&k={k}&purpose=explicit_recall"
+    path = f"/memory?q=invoice+history&k={k}&purpose=explicit_recall&view=full&surface=operator"
     client.responses[("GET", path)] = {"items": [{"content": "Invoice match"}]}
 
     result = json.loads(
@@ -80,14 +80,20 @@ def test_explicit_memory_search_request_contract_preserves_ambient_prefetch(k):
     assert client.calls == [("GET", path, None, None, 3.0)]
     assert result["memories"] == [{"content": "Invoice match"}]
     provider.prefetch("invoice history")
-    assert client.calls[-1] == ("GET", "/memory?q=invoice+history&k=5", None, None, 3.0)
+    assert client.calls[-1] == (
+        "GET",
+        "/memory?q=invoice+history&k=5&view=full&purpose=explicit_recall&surface=operator",
+        None,
+        None,
+        3.0,
+    )
 
 
 def test_prefetch_formats_authoritative_context():
     from plugins.memory.kynver import KynverMemoryProvider
 
     client = FakeClient()
-    client.responses[("GET", "/memory?q=Kynver&k=5")] = {
+    client.responses[("GET", "/memory?q=Kynver&k=5&view=full&purpose=explicit_recall&surface=operator")] = {
         "structuredContent": {
             "memories": [
                 {"content": "Forge uses Kynver as authoritative context.", "sourceId": "hermes:forge"},
@@ -106,11 +112,123 @@ def test_prefetch_formats_authoritative_context():
     assert client.calls[0][4] == 3.0
     assert client.calls[1] == (
         "GET",
-        "/memory?q=Kynver&k=5",
+        "/memory?q=Kynver&k=5&view=full&purpose=explicit_recall&surface=operator",
         None,
         None,
         3.0,
     )
+
+
+def test_whole_item_budget_never_slices_and_indexes_overflow():
+    from plugins.memory.kynver.context import fit_whole_items
+
+    first = {"slug": "fits", "content": "A complete first memory."}
+    too_large = {"slug": "too-large", "title": "Full runbook", "content": "Z" * 2_000}
+    last = {"slug": "also-fits", "content": "A complete later memory."}
+
+    fitted = fit_whole_items(
+        [first, too_large, last],
+        token_budget=100,
+        max_index_items=5,
+    )
+
+    assert fitted.included == [first, last]
+    assert "A complete first memory." in fitted.markdown
+    assert "A complete later memory." in fitted.markdown
+    assert "Z" * 20 not in fitted.markdown
+    assert fitted.omitted == [{
+        "key": "too-large",
+        "title": "Full runbook",
+        "expand": 'kynver_memory_search(key="too-large")',
+    }]
+
+
+def test_context_budget_settings_use_top_level_kynver_config(monkeypatch):
+    import hermes_cli.config
+    from plugins.memory.kynver.context import load_context_settings
+
+    monkeypatch.setattr(hermes_cli.config, "load_config_readonly", lambda: {
+        "memory": {"provider": "kynver"},
+        "kynver": {
+            "prefetch_token_budget": 777,
+            "search_token_budget": 1555,
+            "relevance_score_floor": 0.2,
+            "max_index_items": 3,
+        },
+    })
+
+    settings = load_context_settings()
+    assert settings.prefetch_token_budget == 777
+    assert settings.search_token_budget == 1555
+    assert settings.relevance_score_floor == 0.2
+    assert settings.max_index_items == 3
+
+
+def test_prefetch_full_view_filters_weak_hits_and_does_not_repeat_seen_memory():
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    path = "/memory?q=rules&k=5&view=full&purpose=explicit_recall&surface=operator"
+    client.responses[("GET", path)] = {
+        "items": [
+            {"slug": "strong", "content": "Strong full memory. Do the second step.", "rrfScore": 0.02},
+            {"slug": "weak", "content": "Weak memory.", "rrfScore": 0.001},
+        ]
+    }
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1")
+
+    first = provider.prefetch("rules", session_id="session-1")
+    repeated = provider.prefetch("rules", session_id="session-1")
+    client.responses[("GET", path)]["items"][0]["content"] = "Strong changed full memory. Keep every step."
+    changed = provider.prefetch("rules", session_id="session-1")
+
+    assert "Strong full memory. Do the second step." in first
+    assert "Weak memory." not in first
+    assert repeated == ""
+    assert "Strong changed full memory. Keep every step." in changed
+
+
+def test_prefetch_does_not_repeat_an_unchanged_index_handle(monkeypatch):
+    from plugins.memory.kynver import KynverMemoryProvider
+    import plugins.memory.kynver as kynver
+    import plugins.memory.kynver.context as context
+
+    monkeypatch.setattr(kynver, "load_context_settings", lambda: context.KynverContextSettings(
+        prefetch_token_budget=128,
+        search_token_budget=4000,
+        relevance_score_floor=0,
+        max_index_items=8,
+    ))
+    client = FakeClient()
+    path = "/memory?q=large&k=5&view=full&purpose=explicit_recall&surface=operator"
+    client.responses[("GET", path)] = {
+        "items": [{"slug": "large", "content": "Complete sentence. " * 200}],
+    }
+    provider = KynverMemoryProvider(client=client)
+
+    first = provider.prefetch("large", session_id="session-1")
+    repeated = provider.prefetch("large", session_id="session-1")
+
+    assert "large" in first
+    assert "kynver_memory_search" in first
+    assert repeated == ""
+
+
+def test_explicit_memory_key_expands_full_item_end_to_end():
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    path = "/memory?q=runbook-long&k=1&purpose=explicit_recall&view=full&surface=operator&key=runbook-long"
+    full = "Opening sentence. " + ("whole procedure step. " * 120)
+    client.responses[("GET", path)] = {"items": [{"slug": "runbook-long", "content": full}]}
+    provider = KynverMemoryProvider(client=client)
+
+    result = json.loads(provider.handle_tool_call("kynver_memory_search", {"key": "runbook-long"}))
+
+    assert result["memories"][0]["content"] == full
+    assert result["index"] == []
+    assert client.calls == [("GET", path, None, None, 3.0)]
 
 
 def test_todo_observer_mirrors_via_generic_hook_and_returns_metadata():
@@ -328,7 +446,7 @@ def test_authoritative_context_is_conditional_on_mode_memory_and_health():
 
     provider._mark_degraded("memory.prefetch", RuntimeError("down"))
     assert provider.is_authoritative_context() is False
-    client.responses[("GET", "/memory?q=Recovered&k=5")] = {"memories": [{"content": "Recovered"}]}
+    client.responses[("GET", "/memory?q=Recovered&k=5&view=full&purpose=explicit_recall&surface=operator")] = {"memories": [{"content": "Recovered"}]}
     provider.prefetch("Recovered")
     assert provider.is_authoritative_context() is True
 
@@ -374,7 +492,7 @@ def test_system_prompt_suppresses_local_memory_after_kynver_recovers():
     provider = KynverMemoryProvider(client=client)
     provider.initialize("session-1")
     provider._mark_degraded("memory.prefetch", RuntimeError("down"))
-    client.responses[("GET", "/memory?q=Recovered&k=5")] = {"memories": [{"content": "Recovered"}]}
+    client.responses[("GET", "/memory?q=Recovered&k=5&view=full&purpose=explicit_recall&surface=operator")] = {"memories": [{"content": "Recovered"}]}
     provider.prefetch("Recovered")
     manager = MemoryManager()
     manager.add_provider(provider)

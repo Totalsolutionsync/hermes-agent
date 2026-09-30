@@ -2,14 +2,18 @@
 
 MEMORY_SEARCH_SCHEMA = {
     "name": "kynver_memory_search",
-    "description": "Search authoritative Kynver AgentOS memory/context.",
+    "description": (
+        "Search authoritative Kynver AgentOS memory/context. Results contain only complete memories. "
+        "Use key to expand an exact memory named in an INDEX line."
+    ),
     "parameters": {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Natural language memory query."},
+            "key": {"type": "string", "description": "Exact memory key/slug to expand in full."},
             "k": {"type": "integer", "description": "Maximum results, default 5, max 20."},
         },
-        "required": ["query"],
+        "anyOf": [{"required": ["query"]}, {"required": ["key"]}],
     },
 }
 

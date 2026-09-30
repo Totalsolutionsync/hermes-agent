@@ -38,6 +38,13 @@ from .contract import (
     task_update_path,
     todo_to_task_record,
 )
+from .context import (
+    fit_whole_items,
+    item_fingerprint,
+    item_key,
+    load_context_settings,
+    relevant_items,
+)
 from .pre_transition import TODO_TOOL_NAMES, normalize_hermes_status
 from .schemas import ALL_TOOL_SCHEMAS
 
@@ -220,26 +227,13 @@ def _coerce_items(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _item_text(item: dict[str, Any]) -> str:
-    for key in ("content", "text", "memory", "summary", "description", "title"):
-        value = item.get(key)
-        if value:
-            return str(value).strip()
-    return ""
-
-
 def _format_context(items: list[dict[str, Any]]) -> str:
-    lines = ["## Kynver AgentOS Context", "Authoritative runtime memory for Hermes Forge."]
-    count = 0
-    for item in items[:DEFAULT_SEARCH_LIMIT]:
-        text = _item_text(item)
-        if not text:
-            continue
-        count += 1
-        ref = item.get("key") or item.get("slug") or item.get("id") or item.get("sourceId")
-        suffix = f" [{ref}]" if ref else ""
-        lines.append(f"- {text}{suffix}")
-    return "\n".join(lines) if count else ""
+    settings = load_context_settings()
+    return fit_whole_items(
+        items[:DEFAULT_SEARCH_LIMIT],
+        token_budget=settings.prefetch_token_budget,
+        max_index_items=settings.max_index_items,
+    ).markdown
 
 
 def _filter_skill_items(items: list[dict[str, Any]], query: str, limit: int) -> list[dict[str, Any]]:
@@ -291,6 +285,7 @@ class KynverMemoryProvider(MemoryProvider):
         self._last_error = ""
         self._last_success = ""
         self._degraded_lock = threading.Lock()
+        self._seen_memory_fingerprints: Dict[str, Dict[str, str]] = {}
         # tool_call_id -> annotation for memory writes the core mirror already routed, so the
         # agent-loop observer reports them instead of writing to Kynver a second time.
         self._routed_memory_calls: Dict[str, Dict[str, Any]] = {}
@@ -482,11 +477,38 @@ class KynverMemoryProvider(MemoryProvider):
             return ""
         try:
             payload = self._require_client().get(
-                memory_search_path(q=query.strip(), k=DEFAULT_SEARCH_LIMIT),
+                memory_search_path(
+                    q=query.strip(),
+                    k=DEFAULT_SEARCH_LIMIT,
+                    view="full",
+                    purpose="explicit_recall",
+                    surface="operator",
+                ),
                 timeout=self._client_timeout,
             )
             self._mark_success("memory.prefetch")
-            return _format_context(_coerce_items(payload))
+            settings = load_context_settings()
+            scope = session_id or self._session_id or "default"
+            seen = self._seen_memory_fingerprints.setdefault(scope, {})
+            candidates = relevant_items(_coerce_items(payload), settings.relevance_score_floor)
+            changed = [
+                item for item in candidates
+                if not item_key(item) or seen.get(item_key(item)) != item_fingerprint(item)
+            ]
+            fitted = fit_whole_items(
+                changed[:DEFAULT_SEARCH_LIMIT],
+                token_budget=settings.prefetch_token_budget,
+                max_index_items=settings.max_index_items,
+            )
+            shown_keys = {
+                *(item_key(item) for item in fitted.included),
+                *(row["key"] for row in fitted.omitted),
+            }
+            for item in changed:
+                key = item_key(item)
+                if key and key in shown_keys:
+                    seen[key] = item_fingerprint(item)
+            return fitted.markdown
         except Exception as exc:
             self._mark_degraded("memory.prefetch", exc)
             return ""
@@ -555,6 +577,8 @@ class KynverMemoryProvider(MemoryProvider):
         **kwargs,
     ) -> None:
         self.on_session_end([])
+        if reset and new_session_id:
+            self._seen_memory_fingerprints.pop(new_session_id, None)
         self._session_id = new_session_id or self._session_id
         self._agentos_session_id = ""
         if self._active and not self._sessions_disabled:
@@ -966,17 +990,38 @@ class KynverMemoryProvider(MemoryProvider):
         return tool_error(f"Kynver provider does not handle tool '{tool_name}'")
 
     def _handle_memory_search(self, args: Dict[str, Any]) -> str:
+        key = str(args.get("key") or "").strip()
         query = str(args.get("query") or "").strip()
-        if not query:
-            return tool_error("query is required")
+        if not key and not query:
+            return tool_error("query or key is required")
         k = max(1, min(20, int(args.get("k") or DEFAULT_SEARCH_LIMIT)))
         payload = self._require_client().get(
-            memory_search_path(q=query, k=k, purpose="explicit_recall"),
+            memory_search_path(
+                q=query or key,
+                k=1 if key else k,
+                purpose="explicit_recall",
+                view="full",
+                surface="operator",
+                **({"key": key} if key else {}),
+            ),
             timeout=self._client_timeout,
         )
         self._mark_success("memory.search")
-        memories = _coerce_items(payload)[:k]
-        return _json_result({"success": True, "memories": memories, "count": len(memories), "sourceId": SOURCE_ID})
+        settings = load_context_settings()
+        candidates = relevant_items(_coerce_items(payload), 0.0)[:k]
+        fitted = fit_whole_items(
+            candidates,
+            token_budget=settings.search_token_budget,
+            max_index_items=settings.max_index_items,
+        )
+        return _json_result({
+            "success": True,
+            "memories": fitted.included,
+            "count": len(fitted.included),
+            "index": fitted.omitted,
+            "estimatedTokens": fitted.estimated_tokens,
+            "sourceId": SOURCE_ID,
+        })
 
     def _correct_memory(
         self,
