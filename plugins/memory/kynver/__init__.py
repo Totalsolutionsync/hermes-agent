@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from agent.memory_provider import MemoryProvider
+from agent.memory_provider import MemoryProvider, spawn_context_thread
 from tools.registry import tool_error
 
 from .agentos_bridge import (
@@ -47,6 +47,16 @@ from .context import (
 )
 from .pre_transition import TODO_TOOL_NAMES, normalize_hermes_status
 from .prefetch_guard import PrefetchGuard, degraded_notice
+from .quality_feedback import (
+    MISS_EMPTY,
+    MISS_RATE_LIMITED,
+    POST_TIMEOUT_SECONDS,
+    QualityFeedbackReporter,
+    detect_correction,
+    memory_ids,
+    miss_reason,
+    short_text,
+)
 from .schemas import ALL_TOOL_SCHEMAS
 
 logger = logging.getLogger(__name__)
@@ -291,6 +301,8 @@ class KynverMemoryProvider(MemoryProvider):
         # tool_call_id -> annotation for memory writes the core mirror already routed, so the
         # agent-loop observer reports them instead of writing to Kynver a second time.
         self._routed_memory_calls: Dict[str, Dict[str, Any]] = {}
+        self._turn_number = 0
+        self._feedback = QualityFeedbackReporter(self._require_client, spawn=spawn_context_thread)
 
     @property
     def name(self) -> str:
@@ -383,6 +395,34 @@ class KynverMemoryProvider(MemoryProvider):
         with self._degraded_lock:
             self._last_success = where
             self._degraded_reason = ""
+        if self._feedback_allowed:
+            self._feedback.flush_if_pending()
+
+    @property
+    def _feedback_allowed(self) -> bool:
+        return self._active and not self._observe_only and not self._memory_disabled
+
+    def _record_feedback(self, outcome_kind: str, signal: str, dedupe_text: str, **fields: Any) -> None:
+        if self._feedback_allowed:
+            self._feedback.record(
+                outcome_kind,
+                signal=signal,
+                session_id=self._session_id,
+                turn=self._turn_number,
+                dedupe_text=dedupe_text,
+                **fields,
+            )
+
+    def _record_miss(self, query: str, reason: str) -> None:
+        self._record_feedback("retrieval_miss", "negative", query, query_text=query, note=reason)
+
+    def _record_retrieval(self, query: str, candidates: list, injected: list) -> None:
+        if not candidates:
+            self._record_miss(query, MISS_EMPTY)
+        elif injected:
+            self._record_feedback(
+                "retrieval_used", "positive", query, query_text=query, ids=memory_ids(injected)
+            )
 
     def is_authoritative_context(self) -> bool:
         """Kynver suppresses local MEMORY/USER only when memory is healthy."""
@@ -519,6 +559,7 @@ class KynverMemoryProvider(MemoryProvider):
         if payload is None:
             waiting = guard.cooldown_remaining()
             if waiting > 0:
+                self._record_miss(query, MISS_RATE_LIMITED)
                 payload = guard.stale(query)
                 if payload is None:
                     return degraded_notice(f"rate-limited, retrying in about {int(waiting) + 1}s")
@@ -538,6 +579,7 @@ class KynverMemoryProvider(MemoryProvider):
                 except Exception as exc:
                     self._mark_degraded("memory.prefetch", exc)
                     guard.note_failure(exc)
+                    self._record_miss(query, miss_reason(exc))
                     payload = guard.stale(query)
                     if payload is None:
                         waiting = guard.cooldown_remaining()
@@ -573,6 +615,8 @@ class KynverMemoryProvider(MemoryProvider):
                 key = item_key(item)
                 if key and key in shown_keys:
                     seen[key] = item_fingerprint(item)
+            if not note:  # a stale answer served during a failure was already recorded as a miss
+                self._record_retrieval(query, candidates, fitted.included)
             if note and fitted.markdown:
                 return f"{fitted.markdown}\n_{note}_"
             return fitted.markdown
@@ -601,10 +645,23 @@ class KynverMemoryProvider(MemoryProvider):
         )
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
+        self._turn_number = turn_number
+        phrase = "" if kwargs.get("author_is_bot") else detect_correction(message)
+        if phrase:
+            # correctionReasonClass stays unset: the daily scan / operator classifies it.
+            self._record_feedback(
+                "human_correction",
+                "negative",
+                message,
+                note=f"auto-detected chat correction ({phrase.lower()}): {short_text(message)}",
+            )
         self._log_session_event(
             "turn.started",
             metadata={"turnNumber": turn_number, "messageChars": len(message or "")},
         )
+
+    def shutdown(self) -> None:
+        self._feedback.wait_idle(POST_TIMEOUT_SECONDS)
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         if self._sessions_disabled or self._observe_only:
@@ -1062,17 +1119,21 @@ class KynverMemoryProvider(MemoryProvider):
         if not key and not query:
             return tool_error("query or key is required")
         k = max(1, min(20, int(args.get("k") or DEFAULT_SEARCH_LIMIT)))
-        payload = self._require_client().get(
-            memory_search_path(
-                q=query or key,
-                k=1 if key else k,
-                purpose="explicit_recall",
-                view="full",
-                surface="operator",
-                **({"key": key} if key else {}),
-            ),
-            timeout=self._client_timeout,
-        )
+        try:
+            payload = self._require_client().get(
+                memory_search_path(
+                    q=query or key,
+                    k=1 if key else k,
+                    purpose="explicit_recall",
+                    view="full",
+                    surface="operator",
+                    **({"key": key} if key else {}),
+                ),
+                timeout=self._client_timeout,
+            )
+        except Exception as exc:
+            self._record_miss(query or key, miss_reason(exc))
+            raise
         self._mark_success("memory.search")
         settings = load_context_settings()
         candidates = relevant_items(_coerce_items(payload), 0.0)[:k]
@@ -1081,6 +1142,7 @@ class KynverMemoryProvider(MemoryProvider):
             token_budget=settings.search_token_budget,
             max_index_items=settings.max_index_items,
         )
+        self._record_retrieval(query or key, candidates, fitted.included)
         return _json_result({
             "success": True,
             "memories": fitted.included,
