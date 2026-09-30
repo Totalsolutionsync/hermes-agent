@@ -15,6 +15,7 @@ DEFAULT_PREFETCH_TOKEN_BUDGET = 2_000
 DEFAULT_SEARCH_TOKEN_BUDGET = 4_000
 DEFAULT_RELEVANCE_SCORE_FLOOR = 0.01
 DEFAULT_MAX_INDEX_ITEMS = 8
+DEFAULT_STANDING_RULES_TOKEN_BUDGET = 1_500
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,7 @@ class KynverContextSettings:
     search_token_budget: int = DEFAULT_SEARCH_TOKEN_BUDGET
     relevance_score_floor: float = DEFAULT_RELEVANCE_SCORE_FLOOR
     max_index_items: int = DEFAULT_MAX_INDEX_ITEMS
+    standing_rules_token_budget: int = DEFAULT_STANDING_RULES_TOKEN_BUDGET
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,12 @@ def load_context_settings() -> KynverContextSettings:
             DEFAULT_MAX_INDEX_ITEMS,
             minimum=0,
             maximum=50,
+        ),
+        standing_rules_token_budget=_bounded_int(
+            kynver.get("standing_rules_token_budget"),
+            DEFAULT_STANDING_RULES_TOKEN_BUDGET,
+            minimum=0,
+            maximum=8_000,
         ),
     )
 
