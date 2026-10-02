@@ -143,6 +143,40 @@ def test_whole_item_budget_never_slices_and_indexes_overflow():
     }]
 
 
+def test_unverified_current_state_is_flagged_for_recheck_and_settled_facts_are_not():
+    from plugins.memory.kynver.context import fit_whole_items
+
+    stale = {"slug": "d-drive-down", "content": "D: drive is down; pause Shorts work.",
+             "verificationState": "unverified", "updatedAt": "2026-10-01T09:00:00Z"}
+    expired = {"slug": "pr-open", "content": "PR 12 is open.", "verificationState": "stale_verification"}
+    settled = {"slug": "voice", "content": "Theo uses the Ryan voice.", "verificationState": "not_applicable"}
+
+    md = fit_whole_items([stale, expired, settled], token_budget=500, max_index_items=5).markdown
+    lines = {ln.split(" [")[0][2:]: ln for ln in md.splitlines() if ln.startswith("- ")}
+
+    assert "noted 2026-10-01, unverified: recheck" in lines["D: drive is down; pause Shorts work."]
+    assert "unverified: recheck" in lines["PR 12 is open."]
+    assert "recheck" not in lines["Theo uses the Ryan voice."]
+
+
+def test_memory_write_marks_volatile_state_only_when_asked():
+    calls = []
+
+    class Client:
+        def post(self, path, body, timeout=None):
+            calls.append(body)
+            return {"ok": True}
+
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    provider = KynverMemoryProvider(client=Client())
+    provider._handle_memory_write({"content": "D: drive is down.", "volatile": True})
+    provider._handle_memory_write({"content": "Theo uses the Ryan voice."})
+
+    assert calls[0]["metadata"]["volatile"] is True
+    assert "volatile" not in calls[1]["metadata"]
+
+
 def test_context_budget_settings_use_top_level_kynver_config(monkeypatch):
     import hermes_cli.config
     from plugins.memory.kynver.context import load_context_settings

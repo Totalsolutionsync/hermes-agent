@@ -1175,11 +1175,14 @@ class KynverMemoryProvider(MemoryProvider):
                 {"success": True, "corrected": supersedes, "result": result, "sourceId": SOURCE_ID}
             )
         try:
+            meta: Dict[str, Any] = {"tool": "kynver_memory_write"}
+            if args.get("volatile") is True:
+                meta["volatile"] = True
             result = self._write_memory(
                 content,
                 key=key,
                 memory_type=memory_type or "fact",
-                metadata={"tool": "kynver_memory_write"},
+                metadata=meta,
                 timeout=self._client_timeout,
             )
         except KynverAgentOSError as exc:

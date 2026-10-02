@@ -158,6 +158,22 @@ def _index_entry(item: dict[str, Any]) -> dict[str, str]:
     }
 
 
+_UNTRUSTED_STATES = ("unverified", "stale_verification")
+
+
+def staleness_flag(item: dict[str, Any]) -> str:
+    """Mark a recalled current-state fact Kynver could not verify, so it is rechecked, not trusted.
+
+    Kynver's read-time gate tags volatile memories (outages, PR/deploy state) with a
+    verificationState and laneWarning; dropping them makes a stale state read as truth.
+    """
+    if str(item.get("verificationState") or "") not in _UNTRUSTED_STATES:
+        return ""
+    when = str(item.get("updatedAt") or item.get("createdAt") or "")[:10]
+    noted = f" noted {when}" if when else ""
+    return f" (current-state fact{noted}, unverified: recheck before acting on it)"
+
+
 def fit_whole_items(
     items: Iterable[dict[str, Any]],
     *,
@@ -178,7 +194,7 @@ def fit_whole_items(
             continue
         key = item_key(item)
         suffix = f" [{key}]" if key else ""
-        line = f"- {text}{suffix}"
+        line = f"- {text}{suffix}{staleness_flag(item)}"
         cost = estimate_tokens("\n" + line)
         if used + cost <= token_budget:
             lines.append(line)

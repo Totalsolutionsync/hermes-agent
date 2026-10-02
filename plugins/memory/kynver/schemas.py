@@ -30,6 +30,14 @@ MEMORY_WRITE_SCHEMA = {
             "content": {"type": "string", "description": "Memory content to store."},
             "key": {"type": "string", "description": "Optional stable memory key. For a correction, the new entry's key (must differ from supersedes; defaults to '<supersedes>-correction')."},
             "memoryType": {"type": "string", "description": "fact, decision, preference, lesson, or runbook."},
+            "volatile": {
+                "type": "boolean",
+                "description": (
+                    "true when the content is a temporary current state that will change on its own "
+                    "(an outage, a pause, a drive or service being down, a PR/deploy status). Recall then flags "
+                    "it as unverified so it is rechecked instead of trusted after it goes stale."
+                ),
+            },
             "supersedes": {"type": "string", "description": "Key of an existing memory this content corrects and replaces."},
             "reason": {"type": "string", "description": "Why the old entry is being replaced. Required with supersedes."},
             "reasonClass": {
