@@ -6,9 +6,16 @@ from unittest.mock import patch
 import pytest
 
 
+QUALITY_FEEDBACK_PATH = "/memory/quality-feedback"
+
+
 class FakeClient:
+    """Records Kynver traffic. Automatic quality-feedback posts land on ``feedback`` from a
+    background thread, so they stay out of ``calls`` and exact-traffic assertions."""
+
     def __init__(self):
         self.calls = []
+        self.feedback = []
         self.responses = {}
         self.config = SimpleNamespace(
             enabled=True,
@@ -27,6 +34,9 @@ class FakeClient:
         return self.responses.get(("GET", path), {})
 
     def post(self, path, body, *, slug=None, timeout=None):
+        if path == QUALITY_FEEDBACK_PATH:
+            self.feedback.append(body)
+            return {}
         self.calls.append(("POST", path, body, slug, timeout))
         return self.responses.get(("POST", path), {})
 
@@ -37,6 +47,8 @@ class FakeClient:
 
 class RaisingClient(FakeClient):
     def post(self, path, body, *, slug=None, timeout=None):
+        if path == QUALITY_FEEDBACK_PATH:
+            return super().post(path, body, slug=slug, timeout=timeout)
         self.calls.append(("POST", path, body, slug, timeout))
         raise RuntimeError("401 Bearer super-secret-token api_key=abc123")
 
