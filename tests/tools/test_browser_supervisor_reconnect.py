@@ -65,35 +65,6 @@ def test_post_attach_reconnects_stop_at_budget_and_unregister(monkeypatch, unreg
     assert bs.SUPERVISOR_REGISTRY.get(supervisor.task_id) is None
 
 
-def test_lazy_supervisor_does_not_reconnect_after_drop(monkeypatch, unregister):
-    """A secret-only Browser Use socket fails closed instead of creating approval-prompt retries."""
-    supervisor = bs.CDPSupervisor(
-        task_id="lazy-no-reconnect",
-        cdp_url="ws://127.0.0.1:9222",
-        reconnect_on_drop=False,
-    )
-    bs.SUPERVISOR_REGISTRY._by_task[supervisor.task_id] = supervisor
-    unregister.append(supervisor.task_id)
-    dials = 0
-
-    async def connect(*_args, **_kwargs):
-        nonlocal dials
-        dials += 1
-        return _ClosingWebSocket()
-
-    async def _noop(*_a, **_k):
-        pass
-
-    monkeypatch.setattr(websockets, "connect", connect)
-    monkeypatch.setattr(supervisor, "_attach_initial_page", _noop)
-    monkeypatch.setattr(supervisor, "_read_loop", _noop)
-
-    asyncio.run(supervisor._run())
-
-    assert dials == 1
-    assert bs.SUPERVISOR_REGISTRY.get(supervisor.task_id) is None
-
-
 def test_initial_connect_failure_stays_fatal_for_start(monkeypatch):
     """The budget is post-attach only: a first-dial failure still propagates to ``start()``."""
     supervisor = bs.CDPSupervisor(task_id="initial-failure", cdp_url="ws://127.0.0.1:9222")

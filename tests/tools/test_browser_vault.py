@@ -45,6 +45,13 @@ def store(tmp_path):
     return VaultStore(base_dir=tmp_path / "vault")
 
 
+@pytest.fixture(autouse=True)
+def _builtin_browser_stack(monkeypatch):
+    """Default to the built-in browser stack so a browser-use CLI on the test host cannot flip the
+    transport; the harness tests opt into Browser Use mode themselves."""
+    monkeypatch.setattr("tools.browser_use_cli.is_browser_use_cli_mode", lambda: False)
+
+
 def _add_login(store, origin="https://example.com", password="s3cret-pw"):
     return store.add_item(
         kind="login",
@@ -467,53 +474,6 @@ class TestBrowserVaultTools:
         assert out.get("filled_fields", 0) == 0
         assert "s3cret-pw" not in raw
 
-    def test_secret_eval_lazily_starts_browser_exec_endpoint(self, monkeypatch):
-        """A secret operation may open the second socket, but ordinary browser_exec never does."""
-        from tools import browser_supervisor, browser_vault_tool
-
-        events = []
-
-        class _Supervisor:
-            def evaluate_runtime(self, expression):
-                events.append(("evaluate", expression))
-                return {"ok": True, "result": "filled"}
-
-        class _Registry:
-            def get(self, task_id):
-                events.append(("get", task_id))
-                return None
-
-            def get_lazy_binding(self, task_id):
-                events.append(("endpoint", task_id))
-                return True, "ws://127.0.0.1:9222/devtools/browser/approved", 41
-
-            def get_or_start(self, task_id, cdp_url, **kwargs):
-                events.append(("start", task_id, cdp_url, kwargs["reconnect_on_drop"], kwargs["lazy_binding_token"]))
-                return _Supervisor()
-
-            def evaluate_runtime_if_current(self, task_id, supervisor, token, expression):
-                events.append(("guard", task_id, token))
-                return supervisor.evaluate_runtime(expression)
-
-        monkeypatch.setattr(browser_supervisor, "SUPERVISOR_REGISTRY", _Registry())
-        monkeypatch.setattr("tools.browser_tool_cdp._resolve_cdp_override", lambda url: url)
-        monkeypatch.setattr("tools.browser_tool_cdp._get_dialog_policy_config", lambda: ("auto-dismiss", 5.0))
-        monkeypatch.setattr(
-            "tools.browser_tool_session._run_browser_command",
-            lambda *args, **kwargs: pytest.fail("lazy browser_exec endpoint must not use argv/agent-browser fallback"),
-        )
-
-        result = browser_vault_tool._eval_js_secret("vault-task", "fill_secret()")
-
-        assert result == {"success": True, "result": "filled"}
-        assert events == [
-            ("endpoint", "vault-task"),
-            ("get", "vault-task"),
-            ("start", "vault-task", "ws://127.0.0.1:9222/devtools/browser/approved", False, 41),
-            ("guard", "vault-task", 41),
-            ("evaluate", "fill_secret()"),
-        ]
-
     def test_secret_eval_fails_closed_without_supervisor(self, store):
         """P1-1: the secret-bearing eval NEVER falls back to the argv path."""
         from tools import browser_vault_tool
@@ -718,7 +678,7 @@ class TestSaveLoginPrompt:
         unlock_mod.set_save_login_prompt_callback(prompt)
         monkeypatch.setattr(browser_vault_tool, "_current_page_origin", lambda task_id: "https://acme.test")
         monkeypatch.setattr(browser_vault_tool, "browser_vault_fill",
-                            lambda handle, task_id=None: json.dumps({"success": True, "filled_fields": 1}))
+                            lambda handle, task_id=None, session="": json.dumps({"success": True, "filled_fields": 1}))
         with patch("agent.vault_store.get_vault_store", return_value=store), \
              patch("agent.vault_backends.unlock.can_prompt_here", return_value=True):
             out = json.loads(browser_vault_tool.browser_vault_save_login(task_id="t1"))
@@ -873,3 +833,165 @@ class TestTwoFactor:
              patch.object(browser_vault_tool, "_eval_js", side_effect=fake_eval):
             out = json.loads(browser_vault_tool.browser_vault_enter_code(task_id="t"))
         assert out["error_type"] == "no_code_field"
+
+
+# ---------------------------------------------------------------------------
+# Browser Use mode: the harness daemon's connection is the only page transport
+# ---------------------------------------------------------------------------
+
+class _FakeHarnessDaemon:
+    """A browser_harness daemon speaking its real IPC protocol (newline JSON over AF_UNIX), holding one
+    'browser' with a news tab (the daemon's current page) and a login tab on example.com."""
+
+    def __init__(self, runtime_dir: str, name: str = "default"):
+        import socket
+        import threading
+
+        self.requests: list = []
+        self.tabs = {"T1": "https://news.test/", "T2": "https://example.com/login"}
+        self.current = "T1"
+        self._sessions = {"S2": "T2"}
+        self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._server.bind(os.path.join(runtime_dir, f"bu-{name}.sock"))
+        self._server.listen(8)
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def close(self):
+        self._server.close()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self._server.accept()
+            except OSError:
+                return
+            with conn:
+                data = b""
+                while not data.endswith(b"\n"):
+                    chunk = conn.recv(1 << 16)
+                    if not chunk:
+                        break
+                    data += chunk
+                req = json.loads(data)
+                self.requests.append(req)
+                conn.sendall((json.dumps(self._handle(req)) + "\n").encode())
+
+    def _handle(self, req):
+        meta = req.get("meta")
+        if meta == "ping":
+            return {"pong": True, "pid": 1}
+        if meta == "current_tab":
+            return {"targetId": self.current, "url": self.tabs[self.current], "title": ""}
+        method, params = req["method"], req.get("params") or {}
+        if method == "Target.getTargets":
+            return {"result": {"targetInfos": [{"targetId": t, "type": "page", "url": u} for t, u in self.tabs.items()]}}
+        if method == "Target.attachToTarget":
+            return {"result": {"sessionId": "S" + params["targetId"][1:]}}
+        if method == "Target.detachFromTarget":
+            return {"result": {}}
+        assert method == "Runtime.evaluate", method
+        url = self.tabs[self._sessions.get(req.get("session_id"), self.current)]
+        expr = params["expression"]
+        if expr.startswith("!!"):  # tab probe
+            value = "example.com" in url
+        elif expr == "window.location.href":
+            value = url
+        elif "setter.set.call" in expr:
+            value = json.dumps({"filled": 1})
+        else:  # control inspection
+            value = json.dumps([{"autocomplete": "current-password", "formIndex": 0, "index": 0,
+                                 "label": "", "name": "pw", "type": "password"}])
+        return {"result": {"result": {"type": "string", "value": value}}}
+
+
+@pytest.fixture()
+def harness_runtime(monkeypatch):
+    """Browser Use mode with the harness runtime dir pointed at a short temp dir (AF_UNIX path cap), and
+    every road to a second browser connection or a subprocess booby-trapped."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    from tools import browser_supervisor
+
+    runtime = tempfile.mkdtemp(prefix="bh-", dir="/tmp")
+    monkeypatch.setenv("BH_RUNTIME_DIR", runtime)
+    monkeypatch.setenv("BH_RUNTIME_DIR_SHARED", "1")  # socket per BU_NAME: bu-<session>.sock
+    monkeypatch.delenv("BU_NAME", raising=False)
+    monkeypatch.setattr("tools.browser_use_cli.is_browser_use_cli_mode", lambda: True)
+    forbidden: list = []
+
+    class _NoCDP:
+        def __init__(self, *a, **kw):
+            forbidden.append(("CDPSupervisor", a, kw))
+            raise AssertionError("vault opened a second CDP client")
+
+    def _no_popen(*a, **kw):
+        forbidden.append(("Popen", a, kw))
+        raise OSError("vault spawned a subprocess")
+
+    monkeypatch.setattr(browser_supervisor, "CDPSupervisor", _NoCDP)
+    monkeypatch.setattr("tools.browser_tool_session._run_browser_command",
+                        lambda *a, **kw: forbidden.append(("agent-browser", a, kw)) or {"success": False})
+    monkeypatch.setattr(subprocess, "Popen", _no_popen)
+    yield runtime, forbidden
+    shutil.rmtree(runtime, ignore_errors=True)
+
+
+@pytest.mark.linux_only
+def test_browser_use_vault_fill_runs_over_the_harness_connection(store, harness_runtime, caplog):
+    """Browser Use mode: the fill goes through the named session's running harness daemon. The login tab is
+    reached by target id while the daemon's own tab and the visible tab never move; the password rides only in
+    the IPC payload; nothing dials the browser, spawns a process, or echoes the password into the result or logs."""
+    import logging
+
+    import model_tools  # noqa: F401 — real discovery
+    from tools.registry import registry
+
+    runtime, forbidden = harness_runtime
+    daemon = _FakeHarnessDaemon(runtime, name="work")
+    meta = _add_login(store, origin="https://example.com", password="canary-pw-5591")
+    try:
+        with caplog.at_level(logging.DEBUG), patch("agent.vault_store.get_vault_store", return_value=store):
+            raw = registry.dispatch("browser_vault_fill", {"handle": meta.id, "session": "work"}, task_id="t-harness")
+    finally:
+        daemon.close()
+        from agent import redact
+        redact.clear_vault_redaction_values()
+
+    out = json.loads(raw)
+    assert out["success"] is True and out["filled_fields"] == 1 and out["origin"] == "https://example.com"
+    assert forbidden == []
+    methods = [r.get("meta") or r["method"] for r in daemon.requests]
+    assert daemon.current == "T1" and "set_session" not in methods and "Target.activateTarget" not in methods
+    assert methods.count("Target.attachToTarget") == methods.count("Target.detachFromTarget") > 0
+    carrying = [r for r in daemon.requests if "canary-pw-5591" in json.dumps(r)]
+    assert len(carrying) == 1 and carrying[0]["method"] == "Runtime.evaluate" and carrying[0]["session_id"] == "S2"
+    assert "canary-pw-5591" not in raw and "canary-pw-5591" not in caplog.text
+
+
+@pytest.mark.linux_only
+def test_browser_use_vault_fails_closed_without_a_harness(store, harness_runtime):
+    """No daemon answering: every page-touching vault tool refuses with the persistent-connection error before
+    prompting the user or resolving a secret, and never falls back to dialing the browser itself."""
+    from agent.vault_backends import unlock as unlock_mod
+    from tools import browser_vault_tool
+
+    _runtime, forbidden = harness_runtime
+    meta = _add_login(store, origin="https://example.com", password="canary-pw-5591")
+    prompted = []
+    unlock_mod.set_save_login_prompt_callback(lambda *a: prompted.append(a) or {"identifier": "u", "password": "p"})
+    try:
+        with patch("agent.vault_store.get_vault_store", return_value=store), \
+             patch("agent.vault_backends.unlock.can_prompt_here", return_value=True):
+            results = [json.loads(browser_vault_tool.browser_vault_fill(meta.id, task_id="t")),
+                       json.loads(browser_vault_tool.browser_vault_save_login(task_id="t")),
+                       json.loads(browser_vault_tool.browser_vault_enter_code(meta.id, task_id="t"))]
+    finally:
+        unlock_mod.set_save_login_prompt_callback(None)
+
+    for out in results:
+        assert out["success"] is False and out["error_type"] == "harness_unavailable"
+        assert "persistent browser connection not available" in out["error"].lower()
+    assert forbidden == [] and prompted == []
+    assert "canary-pw-5591" not in json.dumps(results)

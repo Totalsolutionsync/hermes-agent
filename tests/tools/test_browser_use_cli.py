@@ -50,17 +50,14 @@ def _fake_managed_chromium(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _fake_supervisor_registry(monkeypatch):
-    """Record lazy endpoint binding and reject any eager WebSocket start."""
+    """Record any supervisor use: browser_exec must never open a second CDP WebSocket."""
     from tools import browser_supervisor
 
     events = []
 
     class _Registry:
-        def set_lazy_endpoint(self, task_id, cdp_url):
-            events.append(("bind", task_id, cdp_url))
-
-        def get_or_start(self, task_id, cdp_url, **kw):
-            events.append(("start", task_id, cdp_url))
+        def __getattr__(self, name):
+            return lambda *a, **kw: events.append((name, a, kw))
 
     monkeypatch.setattr(browser_supervisor, "SUPERVISOR_REGISTRY", _Registry())
     return events
@@ -239,8 +236,8 @@ class TestToolSurfaceSwap:
 
 
 class TestVaultSupervisorAttach:
-    def test_repeated_exec_only_binds_lazy_endpoint(self, tmp_path, monkeypatch, _fake_supervisor_registry):
-        """Ordinary calls reuse the harness transport and never open the vault's second CDP WebSocket."""
+    def test_repeated_exec_never_touches_the_supervisor(self, tmp_path, monkeypatch, _fake_supervisor_registry):
+        """Ordinary calls reuse the harness transport; nothing is recorded for a later second CDP client."""
         monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {"browser": {"backend": "browser-use"}})
         cli = _fake_cli(tmp_path, 'cat > /dev/null\necho ok\n')
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
@@ -249,10 +246,7 @@ class TestVaultSupervisorAttach:
         second = json.loads(bu_cli.browser_exec("print(2)", task_id="t-vault"))
 
         assert first["success"] is second["success"] is True
-        assert _fake_supervisor_registry == [
-            ("bind", "t-vault", "ws://127.0.0.1:47000/devtools/browser/t-vault"),
-            ("bind", "t-vault", "ws://127.0.0.1:47000/devtools/browser/t-vault"),
-        ]
+        assert _fake_supervisor_registry == []
 
 
 class TestExternalConnectionSafety:

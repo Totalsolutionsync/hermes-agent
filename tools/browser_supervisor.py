@@ -100,15 +100,13 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
     are sync, thread-safe bridges onto that loop; all CDP I/O lives on the loop."""
 
     def __init__(self, task_id: str, cdp_url: str, *, dialog_policy: str = DEFAULT_DIALOG_POLICY,
-                 dialog_timeout_s: float = DEFAULT_DIALOG_TIMEOUT_S,
-                 reconnect_on_drop: bool = True) -> None:
+                 dialog_timeout_s: float = DEFAULT_DIALOG_TIMEOUT_S) -> None:
         if dialog_policy not in _VALID_POLICIES:
             raise ValueError(f"Invalid dialog_policy {dialog_policy!r}; must be one of {sorted(_VALID_POLICIES)}")
         self.task_id = task_id
         self.cdp_url = cdp_url
         self.dialog_policy = dialog_policy
         self.dialog_timeout_s = float(dialog_timeout_s)
-        self.reconnect_on_drop = bool(reconnect_on_drop)
 
         # State protected by ``_state_lock`` for cross-thread reads.
         self._state_lock = threading.Lock()
@@ -427,12 +425,6 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
 
             if self._stop_requested:
                 return
-            if not self.reconnect_on_drop:
-                logger.debug("CDP supervisor %s: dropped lazy connection; waiting for the next supervised operation",
-                             self.task_id)
-                if SUPERVISOR_REGISTRY.get(self.task_id) is self:
-                    SUPERVISOR_REGISTRY._pop(self.task_id)
-                return
             logger.debug("CDP supervisor %s: reconnecting in %.1fs...", self.task_id, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 10.0)
@@ -504,15 +496,6 @@ class _SupervisorRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._by_task: Dict[str, CDPSupervisor] = {}
-        # Browser Use owns its normal CDP transport in another process.  Keep
-        # only the endpoint here until a vault operation actually needs the
-        # model-blind secret channel; ordinary browser_exec calls must not dial
-        # a competing WebSocket merely to make that future operation possible.
-        self._lazy_endpoints: Dict[str, Optional[str]] = {}
-        # Monotonic route identity closes the start/rebind race: endpoint text
-        # alone has an ABA problem (old -> new -> old while a dial is in flight).
-        self._lazy_binding_tokens: Dict[str, int] = {}
-        self._next_lazy_binding_token = 1
 
     def get(self, task_id: str) -> Optional[CDPSupervisor]:
         with self._lock:
@@ -522,57 +505,11 @@ class _SupervisorRegistry:
         with self._lock:
             return self._by_task.pop(task_id, None)
 
-    def set_lazy_endpoint(self, task_id: str, cdp_url: Optional[str]) -> None:
-        """Bind Browser Use's endpoint without connecting to it.
-
-        A changed or cleared route invalidates any supervisor for the old
-        browser immediately.  Repeating the same binding is side-effect free,
-        so an already-approved lazy supervisor stays persistent.
-        """
-        endpoint = str(cdp_url or "").strip() or None
-        with self._lock:
-            unchanged = task_id in self._lazy_endpoints and self._lazy_endpoints[task_id] == endpoint
-            self._lazy_endpoints[task_id] = endpoint
-            if not unchanged:
-                self._lazy_binding_tokens[task_id] = self._next_lazy_binding_token
-                self._next_lazy_binding_token += 1
-            stale = None if unchanged else self._by_task.pop(task_id, None)
-        if stale is not None:
-            stale.stop()
-
-    def get_lazy_binding(self, task_id: str) -> Tuple[bool, Optional[str], Optional[int]]:
-        """Return the endpoint and opaque route token for a fail-closed lazy start."""
-        with self._lock:
-            return (
-                task_id in self._lazy_endpoints,
-                self._lazy_endpoints.get(task_id),
-                self._lazy_binding_tokens.get(task_id),
-            )
-
-    def evaluate_runtime_if_current(self, task_id: str, supervisor: CDPSupervisor,
-                                    lazy_binding_token: int, expression: str) -> Dict[str, Any]:
-        """Evaluate a secret only while the supervisor still owns the bound route.
-
-        Holding the registry lock makes route replacement and the write
-        linearizable: a rebind either wins first and refuses this evaluation,
-        or waits until the already-admitted write finishes before taking effect.
-        """
-        with self._lock:
-            if (self._lazy_binding_tokens.get(task_id) != lazy_binding_token
-                    or self._by_task.get(task_id) is not supervisor):
-                return _fail("supervisor route changed before secret evaluation")
-            return supervisor.evaluate_runtime(expression)
-
     def get_or_start(self, task_id: str, cdp_url: str, *, dialog_policy: str = DEFAULT_DIALOG_POLICY,
-                     dialog_timeout_s: float = DEFAULT_DIALOG_TIMEOUT_S, start_timeout: float = 15.0,
-                     reconnect_on_drop: bool = True,
-                     lazy_binding_token: Optional[int] = None) -> CDPSupervisor:
+                     dialog_timeout_s: float = DEFAULT_DIALOG_TIMEOUT_S, start_timeout: float = 15.0) -> CDPSupervisor:
         """Idempotently ensure a supervisor runs for ``(task_id, cdp_url)``; one bound to a
         different ``cdp_url`` or unhealthy (dead thread / stopped loop) is stopped and replaced."""
         with self._lock:
-            if (lazy_binding_token is not None
-                    and self._lazy_binding_tokens.get(task_id) != lazy_binding_token):
-                raise RuntimeError("Browser route changed before the lazy supervisor could start")
             existing = self._by_task.get(task_id)
             if existing is not None:
                 thread, loop = existing._thread, existing._loop
@@ -584,29 +521,20 @@ class _SupervisorRegistry:
             existing.stop()
 
         supervisor = CDPSupervisor(task_id=task_id, cdp_url=cdp_url,
-                                   dialog_policy=dialog_policy, dialog_timeout_s=dialog_timeout_s,
-                                   reconnect_on_drop=reconnect_on_drop)
+                                   dialog_policy=dialog_policy, dialog_timeout_s=dialog_timeout_s)
         supervisor.start(timeout=start_timeout)
         with self._lock:
-            route_changed = (lazy_binding_token is not None
-                             and self._lazy_binding_tokens.get(task_id) != lazy_binding_token)
             # Guard against a concurrent get_or_start from another thread.
             already = self._by_task.get(task_id)
-            if not route_changed and already is not None and already.cdp_url == cdp_url:
+            if already is not None and already.cdp_url == cdp_url:
                 supervisor.stop()
                 return already
-            if not route_changed:
-                self._by_task[task_id] = supervisor
-        if route_changed:
-            supervisor.stop()
-            raise RuntimeError("Browser route changed while the lazy supervisor was connecting")
+            self._by_task[task_id] = supervisor
         return supervisor
 
     def stop(self, task_id: str) -> None:
         with self._lock:
             supervisor = self._by_task.pop(task_id, None)
-            self._lazy_endpoints.pop(task_id, None)
-            self._lazy_binding_tokens.pop(task_id, None)
         if supervisor is not None:
             supervisor.stop()
 
@@ -615,8 +543,6 @@ class _SupervisorRegistry:
         with self._lock:
             items = list(self._by_task.values())
             self._by_task.clear()
-            self._lazy_endpoints.clear()
-            self._lazy_binding_tokens.clear()
         for supervisor in items:
             supervisor.stop()
 

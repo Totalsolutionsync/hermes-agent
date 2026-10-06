@@ -14,11 +14,18 @@ tools):
   resolved locally, the page origin must EXACTLY match the item's bound
   origin (pre-checked AND re-asserted synchronously inside the fill script),
   the field is chosen by the ported login-control classifier, injection runs
-  exclusively over the supervisor CDP WebSocket (never argv), and the tool
+  exclusively over a socket payload (never argv), and the tool
   result reports only ``{filled_fields, kind, origin, success}`` — the
   password never appears in tool results, logs, or the session DB, and its
   exact bytes are registered with the browser-result redaction boundary so
   no later browser tool call can echo them back to the model.
+
+Page transport: in Browser Use mode every page operation goes through the
+running harness daemon's IPC socket (``browser_vault_harness``) — the one
+approved browser connection ``browser_exec`` uses — and refuses when no daemon
+answers; a second CDP client would re-trigger the browser's remote-debugging
+consent prompt. On the built-in browser stack it uses the CDP supervisor
+attached to Hermes' own agent-browser Chromium.
 
 Ported design from Merit-Systems/OpenInstinct (MIT): opaque-handle vault
 autofill (kernel-login-autofill.ts / fill_from_vault.ts).
@@ -53,14 +60,86 @@ def _check_vault_available() -> bool:
 # JS evaluation plumbing (server-side; results never carry secret values)
 # ---------------------------------------------------------------------------
 
+def _uses_harness() -> bool:
+    """Browser Use mode: the harness daemon owns the browser connection."""
+    from tools.browser_use_cli import is_browser_use_cli_mode
+
+    return is_browser_use_cli_mode()
+
+
+# Browser Use mode: the vault operation in flight per task — the harness session (BU_NAME, "" = default)
+# and the page target it acts on (None = that daemon's current tab). Reset by _harness_begin at the top of
+# every page-touching handler; the target is chosen by _focus_bound_origin.
+_harness_ops: Dict[str, Dict[str, Any]] = {}
+
+
+def _harness_page(task_id: str):
+    """The task's harness daemon; raises HarnessUnavailable when none answers or an operator froze
+    browser connections (browser_exec refuses under the same flag)."""
+    from tools.browser_use_cli import _read_browser_cfg
+    from tools.browser_vault_harness import HarnessPage, HarnessUnavailable
+    from utils import is_truthy_value
+
+    if is_truthy_value(_read_browser_cfg().get("connection_freeze"), default=False):
+        raise HarnessUnavailable("browser.connection_freeze is active")
+    return HarnessPage(_harness_ops.get(task_id, {}).get("session", ""))
+
+
+def _harness_refusal(exc: Exception) -> Dict[str, Any]:
+    from tools.browser_vault_harness import UNAVAILABLE_ERROR
+
+    logger.info("vault: persistent browser connection not available (%s)", exc)
+    return {"success": False, "error_type": "harness_unavailable", "error": UNAVAILABLE_ERROR}
+
+
+def _harness_begin(task_id: str, session: str) -> Optional[Dict[str, Any]]:
+    """Start a page-touching vault operation; returns a refusal or None. Browser Use mode: bind the operation
+    to ``session``'s harness daemon and refuse (fail closed) when none answers — checked before the handler
+    prompts the user or resolves a secret. The built-in stack has no named sessions."""
+    from tools.browser_use_cli import _SESSION_RE
+
+    if session and not _SESSION_RE.match(session):
+        return {"success": False, "error_type": "invalid_session",
+                "error": f"Invalid session name {session!r}: use 1-64 letters, digits, dashes, or underscores."}
+    if not _uses_harness():
+        if session:
+            return {"success": False, "error_type": "invalid_session",
+                    "error": "Named sessions exist only with the Browser Use backend; omit session."}
+        return None
+    from tools.browser_vault_harness import HarnessUnavailable
+
+    _harness_ops[task_id] = {"session": session, "target": None}
+    try:
+        _harness_page(task_id)
+    except HarnessUnavailable as exc:
+        return _harness_refusal(exc)
+    return None
+
+
+def _harness_eval(task_id: str, expression: str, *, secret: bool) -> Dict[str, Any]:
+    from tools.browser_vault_harness import HarnessUnavailable
+
+    try:
+        res = _harness_page(task_id).evaluate(
+            expression, target_id=_harness_ops.get(task_id, {}).get("target"), secret=secret)
+    except HarnessUnavailable as exc:
+        return _harness_refusal(exc)
+    if res.get("ok"):
+        return {"success": True, "result": res.get("result")}
+    return {"success": False, "error_type": "eval_failed", "error": str(res.get("error") or "eval failed")}
+
+
 def _eval_js(task_id: str, expression: str) -> Dict[str, Any]:
     """Evaluate NON-SECRET JS on the current page (inspection, origin reads).
 
-    Prefers the supervisor's persistent CDP WebSocket, falls back to the
-    agent-browser CLI ``eval`` command. Never use this for expressions that
-    embed secret values — the fallback places the expression in subprocess
-    argv. Use :func:`_eval_js_secret` for secret-bearing expressions.
+    Browser Use mode: the harness daemon only. Built-in stack: the supervisor's
+    persistent CDP WebSocket, falling back to the agent-browser CLI ``eval``
+    command. Never use this for expressions that embed secret values — the
+    fallback places the expression in subprocess argv. Use
+    :func:`_eval_js_secret` for secret-bearing expressions.
     """
+    if _uses_harness():
+        return _harness_eval(task_id, expression, secret=False)
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY
 
@@ -88,59 +167,71 @@ def _eval_js(task_id: str, expression: str) -> Dict[str, Any]:
 
 
 def _ensure_supervisor(task_id: str):
-    """The supervisor for ``task_id``, attaching one only when a vault operation needs it.
+    """Built-in stack: the supervisor for ``task_id``, attaching one only when a vault operation needs it.
 
-    Browser Exec records its endpoint without connecting; resolve and attach it here. A local
-    agent-browser ``--session`` has no ``cdp_url`` of its own, so ask that daemon for the packaged
+    A local agent-browser ``--session`` has no ``cdp_url`` of its own, so ask that daemon for the packaged
     Chromium endpoint (``get cdp-url``: same daemon, same reaper) and attach.
     Returns None when no endpoint is reachable; the fill then refuses rather than touching argv."""
     from tools.browser_supervisor import SUPERVISOR_REGISTRY
 
-    browser_exec_bound, cdp_url, lazy_binding_token = SUPERVISOR_REGISTRY.get_lazy_binding(task_id)
     supervisor = SUPERVISOR_REGISTRY.get(task_id)
     if supervisor is not None:
-        return supervisor, lazy_binding_token if browser_exec_bound else None
+        return supervisor
     from tools.browser_tool import _last_session_key
     from tools.browser_tool_cdp import _get_dialog_policy_config, _resolve_cdp_override
     from tools.browser_tool_session import _run_browser_command
 
-    if browser_exec_bound and not cdp_url:
-        return None
-    if not browser_exec_bound:
-        res = _run_browser_command(_last_session_key(task_id), "get", ["cdp-url"])
-        cdp_url = str(((res or {}).get("data") or {}).get("cdpUrl") or "") if (res or {}).get("success") else ""
+    res = _run_browser_command(_last_session_key(task_id), "get", ["cdp-url"])
+    cdp_url = str(((res or {}).get("data") or {}).get("cdpUrl") or "") if (res or {}).get("success") else ""
     if not cdp_url:
         return None
     policy, timeout_s = _get_dialog_policy_config()
     try:
-        supervisor = SUPERVISOR_REGISTRY.get_or_start(
+        return SUPERVISOR_REGISTRY.get_or_start(
             task_id=task_id, cdp_url=_resolve_cdp_override(cdp_url),
             dialog_policy=policy, dialog_timeout_s=timeout_s,
-            reconnect_on_drop=not browser_exec_bound,
-            lazy_binding_token=lazy_binding_token,
         )
-        return supervisor, lazy_binding_token if browser_exec_bound else None
     except Exception as exc:
         logger.debug("vault fill: supervisor attach to local session failed (%s)", exc)
         return None
 
 
-def _eval_js_secret(task_id: str, expression: str) -> Dict[str, Any]:
-    """Evaluate a SECRET-BEARING JS expression. Supervisor CDP-WS only.
-
-    Fails closed: there is deliberately NO fallback to the agent-browser CLI
-    ``eval`` path, because that places the expression — and therefore the
-    credential bytes — in subprocess argv, visible to any process listing.
-    When no supervisor session is available the caller gets a typed refusal
-    (``error_type='supervisor_required'``) and nothing is written.
-    """
+def _lease_refusal(task_id: str) -> Optional[Dict[str, Any]]:
+    """Re-admit at the WRITE. The handler-level fence (_fenced_page_op) admitted before a possibly
+    human-length prompt (enter_code waits for the user's code); a takeover during that wait must
+    refuse here, before the credential lands in a page the human is now typing into. The outer
+    epoch check only discards the result, and a fill is a side effect, not a result."""
+    if not _bot_desktop_browser_session(task_id):
+        return None
+    from tools.bot_desktop import lease as _bd_lease
     try:
-        ensured = _ensure_supervisor(task_id)
+        _bd_lease.assert_agent_may_act()
+    except _bd_lease.HumanHasControl as exc:
+        return {"success": False, "error_type": "human_has_control", "error": str(exc)}
+    return None
+
+
+def _eval_js_secret(task_id: str, expression: str) -> Dict[str, Any]:
+    """Evaluate a SECRET-BEARING JS expression over a socket payload only.
+
+    Browser Use mode: the harness daemon's IPC socket, refusing
+    (``error_type='harness_unavailable'``) when no daemon answers. Built-in
+    stack: the supervisor CDP WebSocket. Fails closed: there is deliberately NO
+    fallback to the agent-browser CLI ``eval`` path, because that places the
+    expression — and therefore the credential bytes — in subprocess argv,
+    visible to any process listing. Without a supervisor session the caller
+    gets a typed refusal (``error_type='supervisor_required'``) and nothing is
+    written.
+    """
+    if _uses_harness():
+        return _lease_refusal(task_id) or _harness_eval(task_id, expression, secret=True)
+    try:
+        supervisor = _ensure_supervisor(task_id)
     except Exception as exc:
         logger.debug("vault fill: supervisor unavailable (%s)", exc)
-        ensured = None
+        supervisor = None
 
-    if ensured is None:
+    if supervisor is None:
         return {
             "success": False,
             "error_type": "supervisor_required",
@@ -153,26 +244,10 @@ def _eval_js_secret(task_id: str, expression: str) -> Dict[str, Any]:
             ),
         }
 
-    supervisor, lazy_binding_token = ensured
-
-    # Re-admit at the WRITE. The handler-level fence (_fenced_page_op) admitted before a possibly
-    # human-length prompt (enter_code waits for the user's code); a takeover during that wait must
-    # refuse here, before the credential lands in a page the human is now typing into. The outer
-    # epoch check only discards the result, and a fill is a side effect, not a result.
-    if _bot_desktop_browser_session(task_id):
-        from tools.bot_desktop import lease as _bd_lease
-        try:
-            _bd_lease.assert_agent_may_act()
-        except _bd_lease.HumanHasControl as exc:
-            return {"success": False, "error_type": "human_has_control", "error": str(exc)}
-
-    if lazy_binding_token is not None:
-        from tools.browser_supervisor import SUPERVISOR_REGISTRY
-        sup = SUPERVISOR_REGISTRY.evaluate_runtime_if_current(
-            task_id, supervisor, lazy_binding_token, expression
-        )
-    else:
-        sup = supervisor.evaluate_runtime(expression)
+    refused = _lease_refusal(task_id)
+    if refused:
+        return refused
+    sup = supervisor.evaluate_runtime(expression)
     if sup.get("ok"):
         return {"success": True, "result": sup.get("result")}
     return {
@@ -217,17 +292,27 @@ _TAB_PROBES = {
 
 
 def _focus_bound_origin(task_id: str, origin: str, kind: str) -> Optional[str]:
-    """Point the supervisor's page session at the open tab on ``origin`` that holds a ``kind`` form
+    """Point the page transport at the open tab on ``origin`` that holds a ``kind`` form
     (browser_exec sessions open their own tabs, so the tab the supervisor attached to first is rarely the
-    login page). Returns the origin when a tab was focused, else None (caller falls back to the current page)."""
-    try:
-        ensured = _ensure_supervisor(task_id)
-    except Exception:
-        ensured = None
-    if ensured is None:
-        return None
-    supervisor, _lazy_binding_token = ensured
-    focused = supervisor.focus_page(origin, accept=_TAB_PROBES.get(kind))
+    login page). On the harness the tab is pinned by target id for this operation only; the daemon's
+    own tab and the visible tab never move. Returns the origin when a tab was focused, else None (caller falls back to the current page)."""
+    if _uses_harness():
+        from tools.browser_vault_harness import HarnessUnavailable
+
+        try:
+            focused = _harness_page(task_id).focus(origin, accept=_TAB_PROBES.get(kind))
+        except HarnessUnavailable:
+            return None
+        if focused.get("ok"):
+            _harness_ops.setdefault(task_id, {"session": ""})["target"] = focused.get("target_id")
+    else:
+        try:
+            supervisor = _ensure_supervisor(task_id)
+        except Exception:
+            supervisor = None
+        if supervisor is None:
+            return None
+        focused = supervisor.focus_page(origin, accept=_TAB_PROBES.get(kind))
     return (origin or focused.get("url")) if focused.get("ok") else None
 
 
@@ -306,13 +391,16 @@ def browser_vault_unlock(backend_name: str) -> str:
     return json.dumps({"success": True, "backend": backend.name})
 
 
-def browser_vault_save_login(label: str = "", task_id: Optional[str] = None) -> str:
+def browser_vault_save_login(label: str = "", task_id: Optional[str] = None, session: str = "") -> str:
     """Ask the user (masked prompt on their surface) for the login of the CURRENT page, store it in the local
     vault bound to that origin, and fill the password at once. The values never enter the conversation."""
     from agent.vault_backends.unlock import can_prompt_here, get_save_login_prompt_callback
     from agent.vault_store import get_vault_store
 
     effective_task_id = task_id or "default"
+    refused = _harness_begin(effective_task_id, session)
+    if refused:
+        return json.dumps(refused)
     # The supervisor's default page session is whatever tab it attached to first (on Browser Use that is
     # the daemon's blank tab); the login form lives in the tab with a password field, so focus that one.
     _focus_bound_origin(effective_task_id, "", "login")
@@ -339,7 +427,7 @@ def browser_vault_save_login(label: str = "", task_id: Optional[str] = None) -> 
         return json.dumps({"success": False, "error_type": "save_failed", "error": str(exc)[:200]})
     finally:
         answer.clear()
-    filled = json.loads(browser_vault_fill(meta.id, task_id=effective_task_id))
+    filled = json.loads(browser_vault_fill(meta.id, task_id=effective_task_id, session=session))
     return json.dumps({"success": True, "handle": meta.id, "origin": origin, "identifier": identifier,
                        "identifier_type": id_type, "fill": filled,
                        "next": "Type the identifier into the username field if the form has one, then submit."},
@@ -350,17 +438,20 @@ _TAB_PROBES["otp"] = ("!!document.querySelector('input[autocomplete=one-time-cod
                       "input[id*=otp i], input[id*=code i], input[name*=totp i], input[aria-label*=code i]')")
 
 
-def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) -> str:
+def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None, session: str = "") -> str:
     """Second factor: fill the one-time code the CURRENT page asks for. If the saved login (``handle``) has an
     authenticator seed, the code is minted server-side and nobody is asked; otherwise the user is prompted on
-    their surface for the code their phone/email/app shows. The code goes into the page over the supervisor
-    socket and never enters the conversation."""
+    their surface for the code their phone/email/app shows. The code goes into the page over the page
+    transport's socket and never enters the conversation."""
     from agent.redact import register_vault_redaction_value
     from agent.vault_backends import backend_for_handle
     from agent.vault_backends.unlock import can_prompt_here, get_code_prompt_callback
     from agent.vault_login_classifier import LoginControl, build_fill_js, build_inspection_js, build_otp_fills, classify_otp_controls
 
     effective_task_id = task_id or "default"
+    refused = _harness_begin(effective_task_id, session)
+    if refused:
+        return json.dumps(refused)
     _focus_bound_origin(effective_task_id, "", "otp")
     origin = _current_page_origin(effective_task_id)
     if not origin:
@@ -415,13 +506,13 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
                        "next": "Submit the form (many sites auto-submit when the last digit lands)."})
 
 
-def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
+def browser_vault_fill(handle: str, task_id: Optional[str] = None, session: str = "") -> str:
     """Fill the current page's password field from a vault handle.
 
     Password-only: the identifier is agent-visible metadata (see
     browser_vault_list) and is typed by the agent via normal input tools.
     The password is resolved server-side and injected via in-page JS over
-    the supervisor CDP WebSocket; the result reports only counts/metadata.
+    the page transport's socket (never argv); the result reports only counts/metadata.
     """
     from agent.redact import register_vault_redaction_value
     from agent.vault_login_classifier import (
@@ -438,6 +529,9 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
     from agent.vault_store import ADDRESS_FIELDS, PAYMENT_FIELDS, scrub_secret_from_text
 
     effective_task_id = task_id or "default"
+    refused = _harness_begin(effective_task_id, session)
+    if refused:
+        return json.dumps(refused)
     backend = backend_for_handle(handle)
     if backend is not None and backend.needs_unlock and not backend.is_unlocked():
         unlocked = json.loads(browser_vault_unlock(backend.name))
@@ -636,6 +730,12 @@ BROWSER_VAULT_UNLOCK_SCHEMA = {
     },
 }
 
+_SESSION_PROPERTY = {
+    "type": "string",
+    "description": ("Named browser session the page is open in (the same session name used to open it). "
+                    "Omit for the default session."),
+}
+
 BROWSER_VAULT_FILL_SCHEMA = {
     "name": "browser_vault_fill",
     "description": (
@@ -653,7 +753,8 @@ BROWSER_VAULT_FILL_SCHEMA = {
             "handle": {
                 "type": "string",
                 "description": "Handle from browser_vault_list (vault_… local, op:… 1Password, bw:… Bitwarden)",
-            }
+            },
+            "session": _SESSION_PROPERTY,
         },
         "required": ["handle"],
     },
@@ -673,7 +774,8 @@ BROWSER_VAULT_SAVE_LOGIN_SCHEMA = {
     ),
     "parameters": {
         "type": "object",
-        "properties": {"label": {"type": "string", "description": "Optional short site name for the saved item (default: the host)."}},
+        "properties": {"label": {"type": "string", "description": "Optional short site name for the saved item (default: the host)."},
+                       "session": _SESSION_PROPERTY},
         "required": [],
     },
 }
@@ -691,7 +793,8 @@ BROWSER_VAULT_ENTER_CODE_SCHEMA = {
     ),
     "parameters": {
         "type": "object",
-        "properties": {"handle": {"type": "string", "description": "The login handle you just filled (lets Hermes generate the code when an authenticator key is saved)."}},
+        "properties": {"handle": {"type": "string", "description": "The login handle you just filled (lets Hermes generate the code when an authenticator key is saved)."},
+                       "session": _SESSION_PROPERTY},
         "required": [],
     },
 }
@@ -704,7 +807,7 @@ def _bot_desktop_browser_session(task_id: Optional[str]) -> bool:
 
 
 def _fenced_page_op(task_id: Optional[str], fn) -> str:
-    """Vault operations focus, inspect and fill the page over the supervisor socket, bypassing
+    """Vault operations focus, inspect and fill the page over the harness/supervisor socket, bypassing
     ``_run_browser_command``; they must honour the Bot Desktop lease like every other page access,
     or a human typing a credential on the taken-over screen could be read or written to."""
     from tools.browser_tool import _active_sessions, _last_session_key
@@ -717,12 +820,14 @@ def _fenced_page_op(task_id: Optional[str], fn) -> str:
 
 def _handle_vault_enter_code(args: Dict[str, Any], **kwargs) -> str:
     tid = kwargs.get("task_id")
-    return _fenced_page_op(tid, lambda: browser_vault_enter_code(handle=str(args.get("handle") or ""), task_id=tid))
+    return _fenced_page_op(tid, lambda: browser_vault_enter_code(handle=str(args.get("handle") or ""), task_id=tid,
+                                                                 session=str(args.get("session") or "")))
 
 
 def _handle_vault_save_login(args: Dict[str, Any], **kwargs) -> str:
     tid = kwargs.get("task_id")
-    return _fenced_page_op(tid, lambda: browser_vault_save_login(label=str(args.get("label") or ""), task_id=tid))
+    return _fenced_page_op(tid, lambda: browser_vault_save_login(label=str(args.get("label") or ""), task_id=tid,
+                                                                 session=str(args.get("session") or "")))
 
 
 def _handle_vault_list(args: Dict[str, Any], **kwargs) -> str:
@@ -735,7 +840,8 @@ def _handle_vault_unlock(args: Dict[str, Any], **kwargs) -> str:
 
 def _handle_vault_fill(args: Dict[str, Any], **kwargs) -> str:
     tid = kwargs.get("task_id")
-    return _fenced_page_op(tid, lambda: browser_vault_fill(handle=str(args.get("handle") or ""), task_id=tid))
+    return _fenced_page_op(tid, lambda: browser_vault_fill(handle=str(args.get("handle") or ""), task_id=tid,
+                                                           session=str(args.get("session") or "")))
 
 
 from tools.registry import no_cache_check_fn, registry  # noqa: E402

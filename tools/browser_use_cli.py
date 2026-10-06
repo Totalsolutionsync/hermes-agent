@@ -516,21 +516,6 @@ def _resolve_real_profile_cdp(env: dict, force_local: bool) -> Optional[str]:
     return err or None
 
 
-def _bind_lazy_vault_supervisor(env: dict, task_id: Optional[str]) -> None:
-    """Remember this exec's CDP route without opening another WebSocket.
-
-    Browser Use's harness daemon owns the normal persistent connection.  A
-    vault operation starts the separate model-blind supervisor lazily; direct
-    cloud routes have no endpoint and remain fail-closed.
-    """
-    cdp = env.get("BU_CDP_WS") or env.get("BU_CDP_URL")
-    try:
-        from tools.browser_supervisor import SUPERVISOR_REGISTRY
-        SUPERVISOR_REGISTRY.set_lazy_endpoint(task_id or "default", cdp)
-    except Exception as exc:
-        logger.debug("browser_exec: lazy CDP supervisor bind failed (non-fatal): %s", exc)
-
-
 def _route_backend(env: dict, session: str, task_id: Optional[str], local: bool) -> Optional[str]:
     """Resolve where the harness connects; returns an error string or None. Real-profile consent runs
     BEFORE provider resolution so a hit short-circuits the cloud path via the BU_CDP_* env contract. Named
@@ -669,7 +654,6 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     started = time.time()
 
     def dispatch() -> Dict[str, Any]:
-        _bind_lazy_vault_supervisor(env, task_id)
         try:
             return {"proc": _run_cli_killing_process_group(cmd, code, env, timeout)}
         except subprocess.TimeoutExpired:

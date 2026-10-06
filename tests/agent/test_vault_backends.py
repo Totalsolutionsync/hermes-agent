@@ -61,6 +61,9 @@ def fake_bw(tmp_path, monkeypatch):
     exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
     log = tmp_path / "bw.log"  # the backend runs bw with an allowlisted env, so the fake logs beside itself
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    # Built-in browser stack: a browser-use CLI (or bare uvx) on the host would route page access through the
+    # harness daemon, which refuses before the unlock path under test runs.
+    monkeypatch.setattr("tools.browser_use_cli.is_browser_use_cli_mode", lambda: False)
     unlock_mod.lock()
     yield exe, log
     unlock_mod.lock()

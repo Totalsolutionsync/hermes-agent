@@ -54,7 +54,6 @@ def _wire_browser_exec(monkeypatch, run_cli):
     monkeypatch.setattr(cloud, "_get_cloud_provider", lambda: None)
     monkeypatch.setattr(session, "_run_browser_command", lambda *_a, **_kw: {
         "success": True, "data": {"cdpUrl": "http://127.0.0.1:9222"}})
-    monkeypatch.setattr(browser_use, "_bind_lazy_vault_supervisor", lambda *a: None)
     monkeypatch.setattr(browser_use, "_run_cli_killing_process_group", run_cli)
     return browser_use
 
@@ -198,9 +197,15 @@ def test_secret_write_re_admits_after_a_takeover_during_the_code_prompt(monkeypa
             evaluated.append(expr)
             return {"ok": True, "result": "{}"}
 
-    monkeypatch.setattr(vault, "_ensure_supervisor", lambda tid: (Sup(), None))
+    monkeypatch.setattr(vault, "_uses_harness", lambda: False)
+    monkeypatch.setattr(vault, "_ensure_supervisor", lambda tid: Sup())
     assert vault._eval_js_secret("default", "fill()")["success"] is True  # agent holds: writes
     lease.acquire("human")  # takeover while the prompt was open
+    res = vault._eval_js_secret("default", "fill()")
+    assert res["success"] is False and res["error_type"] == "human_has_control"
+    # Browser Use mode writes over the harness socket instead; the same re-admit guards it.
+    monkeypatch.setattr(vault, "_uses_harness", lambda: True)
+    monkeypatch.setattr(vault, "_harness_eval", lambda expr, secret: evaluated.append(expr) or {"success": True})
     res = vault._eval_js_secret("default", "fill()")
     assert res["success"] is False and res["error_type"] == "human_has_control"
     assert evaluated == ["fill()"], "the credential must not reach the page under a human lease"
