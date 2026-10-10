@@ -70,9 +70,34 @@ _CORRECTION_RE = re.compile(
 )
 
 
+_CRON_PREFIX = "[IMPORTANT: You are running as a scheduled cron job."
+# Gateway reply context: '[Replying to: "<quoted bot text>"]\n\n<user text>' (gateway/run_inbound.py).
+_REPLY_QUOTE_RE = re.compile(r'^\[Replying to[^\n]*?: ".*?"\]\n\n', re.DOTALL)
+# Recalled-memory block the gateway may append to the user turn.
+_MEMORY_CONTEXT_RE = re.compile(r"<memory-context>.*?(?:</memory-context>|$)", re.DOTALL)
+
+
+def human_text(message: str) -> str:
+    """Only the words the human typed this turn: drops cron prompts, slash-skill bodies,
+    the quoted bot message in a reply, and injected memory context. Those are agent- or
+    system-authored, so a correction phrase inside them is not a correction."""
+    text = message or ""
+    if text.startswith(_CRON_PREFIX):
+        return ""
+    try:
+        from agent.skill_commands import extract_user_instruction_from_skill_message
+
+        text = extract_user_instruction_from_skill_message(text) or ""
+    except Exception:
+        if text.startswith("[IMPORTANT: The user has invoked the "):
+            return ""
+    text = _MEMORY_CONTEXT_RE.sub("", text)
+    return _REPLY_QUOTE_RE.sub("", text, count=1).strip()
+
+
 def detect_correction(message: str) -> str:
-    """The phrase that makes *message* look like a correction of the agent, or ""."""
-    match = _CORRECTION_RE.search(message or "")
+    """The phrase that makes the human part of *message* look like a correction of the agent, or ""."""
+    match = _CORRECTION_RE.search(human_text(message))
     return match.group(0).strip() if match else ""
 
 
