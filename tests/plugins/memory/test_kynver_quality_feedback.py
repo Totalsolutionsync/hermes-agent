@@ -191,3 +191,34 @@ def test_observe_only_and_config_opt_out_record_nothing(hermes_home):
     provider.prefetch("anything")
     _settle(provider)
     assert client.feedback == []
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "[IMPORTANT: You are running as a scheduled cron job. DELIVERY: ... it is already done.",
+        '[IMPORTANT: The user has invoked the "github-pr-workflow" skill, indicating they want you to follow its '
+        "instructions. The full skill content is loaded below.]\n\nRemember that CI must pass.",
+        '[Replying to: "Both are relaunched, the last worker had already done most of it"]\n\nlooks good, ship it',
+        "Please dig into this\n\n<memory-context>\nWill said we agreed on Friday\n</memory-context>",
+    ],
+)
+def test_agent_or_system_text_is_not_a_correction(hermes_home, message):
+    client = FakeKynver()
+    provider = _provider(client)
+
+    provider.on_turn_start(1, message)
+    _settle(provider)
+
+    assert client.feedback == []
+
+
+def test_correction_after_reply_quote_is_still_detected(hermes_home):
+    client = FakeKynver()
+    provider = _provider(client)
+
+    provider.on_turn_start(1, '[Replying to: "Here is the plan"]\n\nI already told you the deploy is Friday')
+    _settle(provider)
+
+    assert len(client.feedback) == 1
+    assert "i already told" in client.feedback[0]["note"]

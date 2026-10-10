@@ -646,7 +646,7 @@ class KynverMemoryProvider(MemoryProvider):
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         self._turn_number = turn_number
-        phrase = "" if kwargs.get("author_is_bot") else detect_correction(message)
+        phrase = "" if kwargs.get("author_is_bot") or self._platform == "cron" else detect_correction(message)
         if phrase:
             # correctionReasonClass stays unset: the daily scan / operator classifies it.
             self._record_feedback(
