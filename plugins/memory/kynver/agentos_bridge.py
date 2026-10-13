@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import gzip
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,6 +27,17 @@ _DEFAULT_SIDE_EFFECT_TIMEOUT_SECONDS = 3.0
 _VALID_MODES = {"enabled", "observe", "disabled"}
 _DEFAULT_MEMORY_WRITE_MODE = "kynver_first_receipt_only"
 _VALID_MEMORY_WRITE_MODES = frozenset({"off", "mirror", _DEFAULT_MEMORY_WRITE_MODE})
+
+
+def _decoded_body(res: Any) -> bytes:
+    """Read a urllib response/HTTPError body, un-gzipping when the server did."""
+    body = res.read()
+    if (res.headers.get("Content-Encoding") or "").lower() == "gzip":
+        try:
+            return gzip.decompress(body)
+        except (OSError, EOFError):
+            return body
+    return body
 
 
 class KynverAgentOSError(RuntimeError):
@@ -227,14 +239,16 @@ class KynverAgentOSClient:
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self.config.api_key}",
                 "User-Agent": "hermes-kynver-agentos/1.0",
+                # Kynver gzips /api JSON over 1 KB; urllib doesn't ask by default.
+                "Accept-Encoding": "gzip",
             },
             method=method.upper(),
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout or self.config.timeout) as res:  # nosec B310
-                payload = res.read().decode("utf-8", errors="replace")
+                payload = _decoded_body(res).decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
+            detail = _decoded_body(exc).decode("utf-8", errors="replace") if exc.fp else str(exc)
             raise KynverAgentOSError(
                 redact(f"Kynver AgentOS HTTP {exc.code}: {detail}"),
                 status=exc.code,
