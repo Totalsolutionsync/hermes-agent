@@ -74,6 +74,51 @@ _hermes_ensure_own_tab()
 del _hermes_ensure_own_tab
 """
 
+# SHARED default transport (one consent-gated CDP connection, many callers): every Hermes
+# chat, cron and subagent drives the SAME daemon, whose "current tab" is global. Two callers
+# interleaving goto_url() navigate each other's tabs (Forge's prod poll loop kept turning the
+# engagement cron's TikTok tab into kynver.com/dashboard/chat). Each task gets its own pinned
+# tab (restored before its code runs, recorded after) and calls are serialized by a file lock.
+_TASK_TAB_PREAMBLE = """\
+# hermes: restore this task's own tab on the shared daemon
+def _hermes_task_tab():
+    import os as _os, json as _json, atexit as _ax
+    _p = _os.environ.get("HERMES_BU_TASK_TAB_FILE")
+    if not _p:
+        return
+    _tid = None
+    try:
+        _tid = (_json.load(open(_p)) or {}).get("targetId")
+    except Exception:
+        pass
+    _live = set()
+    try:
+        _live = {t["targetId"] for t in cdp("Target.getTargets")["targetInfos"] if t.get("type") == "page"}
+    except Exception:
+        pass
+    try:
+        if _tid and _tid in _live:
+            switch_tab(_tid)
+        else:
+            _new = cdp("Target.createTarget", url="about:blank", background=True).get("targetId")
+            if _new:
+                switch_tab(_new)
+    except Exception:
+        pass
+    def _save():
+        try:
+            _cur = current_tab()["targetId"]
+            with open(_p, "w") as _f:
+                _json.dump({"targetId": _cur}, _f)
+        except Exception:
+            pass
+    _ax.register(_save)
+_hermes_task_tab()
+del _hermes_task_tab
+"""
+
+_SHARED_LOCK_WAIT_S = 120
+
 _DEFAULT_TIMEOUT_S = 300
 _MIN_TIMEOUT_S = 5
 _MAX_TIMEOUT_S = 1800
@@ -592,6 +637,73 @@ def _run_cli_killing_process_group(cmd, code, env, timeout):
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
+def _shared_state_dir() -> Optional[Path]:
+    try:
+        d = Path(get_hermes_home()) / "cache" / "browser-use" / "shared"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except Exception:
+        return None
+
+
+def _task_tab_file(task_id: Optional[str]) -> Optional[str]:
+    d = _shared_state_dir()
+    if d is None:
+        return None
+    key = _TASK_ID_SAFE_RE.sub("_", task_id or "default")[:120] or "default"
+    return str(d / f"tab-{key}.json")
+
+
+def _acquire_shared_lock(task_id: Optional[str]):
+    """Serialize calls on the shared default daemon. Returns (fd, None) or (None, holder)."""
+    d = _shared_state_dir()
+    if d is None:
+        return None, "lock dir unavailable"
+    try:
+        import fcntl
+    except ImportError:  # Windows: no cross-process serialization, keep pre-fix behavior
+        return -1, None
+    path = d / "default.lock"
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.time() + _SHARED_LOCK_WAIT_S
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{task_id or 'default'} pid={os.getpid()} since={time.strftime('%H:%M:%S')}".encode())
+            return fd, None
+        except BlockingIOError:
+            if time.time() >= deadline:
+                try:
+                    holder = os.pread(fd, 300, 0).decode(errors="replace").strip() or "unknown"
+                except OSError:
+                    holder = "unknown"
+                os.close(fd)
+                return None, holder
+            time.sleep(0.5)
+
+
+def _release_shared_lock(fd) -> None:
+    if fd is None or fd == -1:
+        return
+    try:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    with contextlib.suppress(OSError):
+        os.close(fd)
+
+
+def _agent_tool_deadline_s() -> Optional[float]:
+    try:
+        from agent.tool_executor import _resolve_sequential_tool_timeout
+        v = _resolve_sequential_tool_timeout()
+        return float(v) if v and v > 0 else None
+    except Exception:
+        return None
+
+
 def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT_S,
                  task_id: Optional[str] = None, local: bool = False):
     """Run Python code through the browser-use CLI, and return its output"""
@@ -640,6 +752,12 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
         )
     if session and not private_browser:
         code = _OWN_TAB_PREAMBLE + code
+    shared_default = not session and _has_cdp_env(env)
+    if shared_default:
+        tab_file = _task_tab_file(task_id)
+        if tab_file:
+            env["HERMES_BU_TASK_TAB_FILE"] = tab_file
+            code = _TASK_TAB_PREAMBLE + code
 
     workspace = _workspace_dir(task_id)
     if workspace:
@@ -651,10 +769,23 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
         env["BU_AUTOSPAWN"] = "1"
 
     timeout = _clamp_timeout(timeout_s)
+    # Stay inside the agent's per-tool deadline: past it the executor abandons the call but the
+    # CLI (and any goto_url loop in it) keeps driving the shared browser as an orphan.
+    tool_deadline = _agent_tool_deadline_s()
+    if tool_deadline:
+        timeout = max(_MIN_TIMEOUT_S, min(timeout, int(tool_deadline) - 30 - (_SHARED_LOCK_WAIT_S if shared_default else 0)))
     started = time.time()
 
     def dispatch() -> Dict[str, Any]:
+        lock = None
         try:
+            if shared_default:
+                lock, holder = _acquire_shared_lock(task_id)
+                if lock is None:
+                    return {"error_result": tool_error(
+                        f"The shared browser is busy with another task ({holder}) and stayed busy for "
+                        f"{_SHARED_LOCK_WAIT_S}s. Retry shortly; keep browser calls short (no long poll "
+                        "loops: poll with terminal/curl instead).")}
             return {"proc": _run_cli_killing_process_group(cmd, code, env, timeout)}
         except subprocess.TimeoutExpired:
             return {"error_result": tool_error(
@@ -664,6 +795,9 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
             )}
         except OSError as e:
             return {"error_result": tool_error(f"Failed to launch browser-use CLI: {e}")}
+        finally:
+            if lock is not None:
+                _release_shared_lock(lock)
 
     if bot_desktop_browser:
         from tools.browser_tool_session import run_fenced

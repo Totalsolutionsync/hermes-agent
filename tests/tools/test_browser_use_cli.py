@@ -986,8 +986,26 @@ class TestBrowserExec:
         result = json.loads(bu_cli.browser_exec('print("hi")'))
         assert result["success"] is True
         assert result["exit_code"] == 0
-        assert 'got:print("hi")' in result["output"]
+        # A shared CDP override (this host's config) prepends the per-task tab preamble.
+        assert result["output"].rstrip().endswith('print("hi")')
         assert "session" not in result
+
+    def test_shared_default_pins_task_tab_and_serializes(self, tmp_path, monkeypatch):
+        cli = _fake_cli(tmp_path, 'code=$(cat)\necho "tab=$HERMES_BU_TASK_TAB_FILE"\necho "$code" | head -1\n')
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+        monkeypatch.setattr(bu_cli, "_shared_state_dir", lambda: tmp_path)
+        monkeypatch.setattr(bu_cli, "_route_backend", lambda env, *a, **k: env.update(BU_CDP_URL="http://x") or None)
+        out = json.loads(bu_cli.browser_exec('print(1)', task_id="cron_a/b"))["output"]
+        assert "tab-cron_a_b.json" in out
+        assert "restore this task's own tab" in out
+        # a held lock makes a second caller give up with a clear message instead of interleaving
+        import fcntl, os
+        fd = os.open(str(tmp_path / "default.lock"), os.O_RDWR | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        monkeypatch.setattr(bu_cli, "_SHARED_LOCK_WAIT_S", 1)
+        res = json.loads(bu_cli.browser_exec('print(1)', task_id="other"))
+        os.close(fd)
+        assert "shared browser is busy" in res["error"]
 
     def test_session_sets_bu_name(self, tmp_path, monkeypatch):
         cli = _fake_cli(tmp_path, 'cat > /dev/null\necho "bu:$BU_NAME"\n')
