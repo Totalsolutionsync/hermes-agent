@@ -130,6 +130,84 @@ def standing_rules_notice(fit: StandingRulesFit) -> str:
     return ""
 
 
+ALWAYS_HEADER = (
+    "# Standing rules (Kynver)\n"
+    "Will's standing rules. They apply on EVERY turn and to every worker you brief, "
+    "whatever the topic. They override older memories that disagree. Topic rules arrive "
+    "with the message that mentions the topic."
+)
+
+
+@dataclass(frozen=True)
+class TopicPolicy:
+    """One ``topicPolicy`` response (docs/runbooks/standing-rules-topic-loading.md)."""
+
+    topic_set_key: str
+    fingerprint: str
+    always_markdown: str
+    topics_markdown: str
+    status_line: str
+    always_over_cap: bool
+    needs_merge: list[str] = field(default_factory=list)
+
+    @property
+    def cache_key(self) -> str:
+        import hashlib
+
+        body = hashlib.sha1(self.topics_markdown.encode("utf-8")).hexdigest()[:12]
+        return f"{self.topic_set_key}|{body}"
+
+
+def parse_topic_policy(payload: Any) -> TopicPolicy | None:
+    """None when the server predates topic loading (caller falls back to budget packing)."""
+    if not isinstance(payload, Mapping):
+        return None
+    tp = payload.get("topicPolicy")
+    if not isinstance(tp, Mapping):
+        return None
+    markdown = tp.get("markdown") if isinstance(tp.get("markdown"), Mapping) else {}
+    always = tp.get("always") if isinstance(tp.get("always"), Mapping) else {}
+    topics = tp.get("topics") if isinstance(tp.get("topics"), list) else []
+    return TopicPolicy(
+        topic_set_key=str(tp.get("topicSetKey") or ""),
+        fingerprint=str(tp.get("fingerprint") or ""),
+        always_markdown=str(markdown.get("always") or "").strip(),
+        topics_markdown=str(markdown.get("topics") or "").strip(),
+        status_line=str(tp.get("statusLine") or "").strip(),
+        always_over_cap=bool(always.get("overCap")),
+        needs_merge=[str(t.get("slug")) for t in topics if isinstance(t, Mapping) and t.get("needsMerge")],
+    )
+
+
+def topic_policy_always_block(policy: TopicPolicy) -> str:
+    """System-prompt block: the every-turn floor only (byte-stable for the session)."""
+    body = policy.always_markdown
+    if body.startswith("# "):
+        body = body.split("\n", 1)[1].strip() if "\n" in body else ""
+    parts = [ALWAYS_HEADER]
+    if body:
+        parts.append(body)
+    if policy.always_over_cap:
+        parts.append(
+            f"WARNING: the every-turn rules are over their cap ({policy.status_line}). "
+            "Tell Will and offer to move some under a topic. No rule was dropped."
+        )
+    return "\n".join(parts)
+
+
+def topic_policy_turn_block(policy: TopicPolicy) -> str:
+    """Turn-context block: the matched topics' rules (never placed in the system prompt)."""
+    if not policy.topic_set_key or not policy.topics_markdown:
+        return ""
+    block = policy.topics_markdown
+    if policy.needs_merge:
+        block += (
+            f"\n_(Topic(s) {', '.join(policy.needs_merge)} are large and should be merged; "
+            "all rules are still shown.)_"
+        )
+    return block
+
+
 def summarize_for_status(fit: StandingRulesFit) -> dict[str, Any]:
     return {
         "loaded": len(fit.included),
@@ -146,7 +224,11 @@ __all__: Sequence[str] = (
     "DEFAULT_STANDING_RULES_TOKEN_BUDGET",
     "INSTRUCTION_POLICY_PATH",
     "StandingRulesFit",
+    "TopicPolicy",
     "fit_standing_rules",
+    "parse_topic_policy",
+    "topic_policy_always_block",
+    "topic_policy_turn_block",
     "standing_rules_notice",
     "summarize_for_status",
 )

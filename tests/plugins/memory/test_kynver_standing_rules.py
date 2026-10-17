@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-POLICY_PATH = "/memory/instruction-policy?includeMarkdown=1"
+POLICY_PATH = "/memory/instruction-policy?includeMarkdown=1&topics="
 
 
 class FakeClient:
@@ -125,3 +125,53 @@ def test_budget_zero_disables_and_config_bounds_apply(_home):
 
     assert "Standing rules" not in provider.system_prompt_block()
     assert POLICY_PATH not in client.calls
+
+
+def _topic_payload(topic_set_key="", topics_md=""):
+    return {
+        "topicPolicy": {
+            "topicSetKey": topic_set_key,
+            "fingerprint": "fp",
+            "statusLine": "Standing rules: always 1 (~20 tokens)",
+            "always": {"overCap": False},
+            "topics": [],
+            "markdown": {
+                "always": "# Standing rules — always\n- (floor-rule) Always do the floor thing.",
+                "topics": topics_md,
+            },
+        }
+    }
+
+
+class TopicClient(FakeClient):
+    def get(self, path, *, slug=None, timeout=None):
+        self.calls.append(path)
+        if "text=" in path and "email" in path:
+            return _topic_payload("email", "# Standing rules for this conversation's topics\n\n## Email\n- Email rule body.")
+        return _topic_payload()
+
+
+def test_topic_mode_puts_only_always_tier_in_system_prompt_without_full_warning():
+    provider = _provider(TopicClient())
+    block = provider.system_prompt_block()
+    assert "Always do the floor thing" in block
+    assert "Email rule body" not in block
+    assert "STANDING RULES FULL" not in block
+    assert provider._standing_rules_status["mode"] == "topics"
+
+
+def test_topic_rules_arrive_once_per_session_on_matching_turn():
+    provider = _provider(TopicClient())
+    provider.system_prompt_block()
+    assert provider._standing_rules_turn_block("what's the weather", "s1") == ""
+    first = provider._standing_rules_turn_block("draft an email to Andy", "s1")
+    assert "Email rule body" in first
+    assert provider._standing_rules_turn_block("another email please", "s1") == ""
+    assert "Email rule body" in provider._standing_rules_turn_block("email", "s2")
+
+
+def test_topic_fetch_failure_fails_open():
+    provider = _provider(TopicClient())
+    provider.system_prompt_block()
+    provider._client = FakeClient(exc=RuntimeError("down"))
+    assert provider._standing_rules_turn_block("draft an email", "s1") == ""

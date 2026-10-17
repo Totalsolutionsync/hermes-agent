@@ -507,14 +507,30 @@ class KynverMemoryProvider(MemoryProvider):
                 budget = load_context_settings().standing_rules_token_budget
                 if budget > 0:
                     payload = self._require_client().get(
-                        f"{INSTRUCTION_POLICY_PATH}?includeMarkdown=1",
+                        f"{INSTRUCTION_POLICY_PATH}?includeMarkdown=1&topics=",
                         timeout=self._client_timeout,
                     )
-                    fit = fit_standing_rules(payload, budget=budget)
-                    self._standing_rules_status = summarize_for_status(fit)
-                    block = fit.markdown
-                    if fit.full:
-                        logger.warning("Kynver standing rules full: %s", self._standing_rules_status)
+                    from .standing_rules import parse_topic_policy, topic_policy_always_block
+
+                    policy = parse_topic_policy(payload)
+                    if policy is not None:
+                        # Topic loading: only the every-turn floor goes in the system prompt;
+                        # topic rules arrive per turn via _standing_rules_turn_block().
+                        self._standing_rules_topic_mode = True
+                        self._standing_rules_status = {
+                            "mode": "topics",
+                            "statusLine": policy.status_line,
+                            "alwaysOverCap": policy.always_over_cap,
+                        }
+                        block = topic_policy_always_block(policy)
+                        if policy.always_over_cap:
+                            logger.warning("Kynver every-turn rules over cap: %s", policy.status_line)
+                    else:
+                        fit = fit_standing_rules(payload, budget=budget)
+                        self._standing_rules_status = summarize_for_status(fit)
+                        block = fit.markdown
+                        if fit.full:
+                            logger.warning("Kynver standing rules full: %s", self._standing_rules_status)
                     self._mark_success("memory.standing_rules")
             except Exception as exc:
                 self._mark_degraded("memory.standing_rules", exc)
@@ -524,6 +540,35 @@ class KynverMemoryProvider(MemoryProvider):
                     "memory before any file, email, worker or publishing action."
                 )
         self._standing_rules_cache = block
+        return block
+
+    def _standing_rules_turn_block(self, text: str, scope: str) -> str:
+        """Topic rules matched by this message; each topic set is shown once per session."""
+        if not getattr(self, "_standing_rules_topic_mode", False) or not (text or "").strip():
+            return ""
+        from urllib.parse import urlencode
+
+        from .standing_rules import INSTRUCTION_POLICY_PATH, parse_topic_policy, topic_policy_turn_block
+
+        try:
+            payload = self._require_client().get(
+                f"{INSTRUCTION_POLICY_PATH}?" + urlencode({"text": text[:2000]}),
+                timeout=min(self._client_timeout or 15, 15),
+            )
+            policy = parse_topic_policy(payload)
+        except Exception as exc:
+            self._mark_degraded("memory.standing_rules_topics", exc)
+            return ""
+        if policy is None or not policy.topic_set_key:
+            return ""
+        if not hasattr(self, "_standing_rules_topics_seen"):
+            self._standing_rules_topics_seen: Dict[str, set] = {}
+        seen = self._standing_rules_topics_seen.setdefault(scope, set())
+        if policy.cache_key in seen:
+            return ""
+        block = topic_policy_turn_block(policy)
+        if block:
+            seen.add(policy.cache_key)
         return block
 
     def system_prompt_block(self) -> str:
@@ -550,6 +595,15 @@ class KynverMemoryProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        recall = self._prefetch_recall(query, session_id=session_id)
+        if self._memory_disabled:
+            return recall
+        topic_rules = self._standing_rules_turn_block(query, session_id or self._session_id or "default")
+        if topic_rules:
+            return f"{topic_rules}\n\n{recall}" if recall else topic_rules
+        return recall
+
+    def _prefetch_recall(self, query: str, *, session_id: str = "") -> str:
         if self._memory_disabled or not (query or "").strip():
             return ""
         query = query.strip()
