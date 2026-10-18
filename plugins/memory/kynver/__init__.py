@@ -19,6 +19,7 @@ from .agentos_bridge import (
     redact,
 )
 from .contract import (
+    DECISION_CHECK_PATH,
     LIMITATION_CHECK_PATH,
     MANUAL_STEP_CHECK_PATH,
     MEMORY_CORRECT_PATH,
@@ -1150,6 +1151,8 @@ class KynverMemoryProvider(MemoryProvider):
                 return self._handle_limitation_check(args)
             if tool_name == "kynver_memory_check_manual_step":
                 return self._handle_check_manual_step(args)
+            if tool_name == "kynver_memory_decision_check":
+                return self._handle_decision_check(args)
             if tool_name == "kynver_task_create":
                 return self._handle_task_create(args)
             if tool_name == "kynver_task_update":
@@ -1231,6 +1234,23 @@ class KynverMemoryProvider(MemoryProvider):
             timeout=self._client_timeout,
         )
         self._mark_success("memory.limitation_check")
+        return _json_result({"success": True, **(payload if isinstance(payload, dict) else {"result": payload})})
+
+    def _handle_decision_check(self, args: Dict[str, Any]) -> str:
+        from urllib.parse import urlencode
+
+        entity = str(args.get("entity") or "").strip()
+        if not entity:
+            return tool_error("entity is required")
+        params = {"entity": entity[:200]}
+        limit = args.get("limit")
+        if isinstance(limit, int) and 1 <= limit <= 10:
+            params["limit"] = str(limit)
+        payload = self._require_client().get(
+            f"{DECISION_CHECK_PATH}?{urlencode(params)}",
+            timeout=self._client_timeout,
+        )
+        self._mark_success("memory.decision_check")
         return _json_result({"success": True, **(payload if isinstance(payload, dict) else {"result": payload})})
 
     def _correct_memory(

@@ -95,6 +95,23 @@ MEMORY_LIMITATION_CHECK_SCHEMA = {
     },
 }
 
+MEMORY_DECISION_CHECK_SCHEMA = {
+    "name": "kynver_memory_decision_check",
+    "description": (
+        "Before acting on an older todo, plan item, cron prompt or brief (posting, booking, scheduling, merging), "
+        "check the newest recorded decisions about its subject. Returns decisions newest first (key, updatedAt, one line); "
+        "follow the newest over the older instruction. Empty means no recorded decision mentions it."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "entity": {"type": "string", "description": "Short title, PR number or id, e.g. 'Rufford Ford' or '#4309'."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10, "description": "Max decisions (default 3)."},
+        },
+        "required": ["entity"],
+    },
+}
+
 TASK_CREATE_SCHEMA = {
     "name": "kynver_task_create",
     "description": "Create a Kynver AgentOS task/control-plane record.",
@@ -253,6 +270,7 @@ ALL_TOOL_SCHEMAS = [
     MEMORY_WRITE_SCHEMA,
     MEMORY_LIMITATION_CHECK_SCHEMA,
     MEMORY_CHECK_MANUAL_STEP_SCHEMA,
+    MEMORY_DECISION_CHECK_SCHEMA,
     TASK_CREATE_SCHEMA,
     TASK_UPDATE_SCHEMA,
     TASK_LIST_SCHEMA,

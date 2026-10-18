@@ -72,6 +72,10 @@ def _item(raw: Dict[str, Any]) -> Optional[Dict[str, str]]:
     by = describe_actor(raw.get("by"))
     if by:
         item["by"] = by
+    # A newer decision overrides this item (Kynver flags it): one line, read-only.
+    superseded = raw.get("superseded")
+    if isinstance(superseded, str) and superseded.strip():
+        item["superseded"] = " ".join(superseded.split())[:240]
     return item
 
 

@@ -179,8 +179,9 @@ class TodoStore(BaseTodoStore):
             keep = item["status"] in _ACTIVE_STATUSES or has_active_kid
             if keep:
                 marker = _STATUS_MARKERS.get(item["status"], "[?]")
+                flag = f" — {item['superseded']} (do not act on it)" if item.get("superseded") else ""
                 out.append(f"{'  ' * depth}- {marker} {item['id']}. "
-                           f"{item['content']} ({item['status']})")
+                           f"{item['content']} ({item['status']}){flag}")
                 out.extend(kid_lines)
             return keep
 
@@ -275,6 +276,8 @@ def format_checklist(items: List[Dict[str, str]]) -> str:
         suffix = " (dropped)" if status == "cancelled" else ""
         if item.get("by"):
             suffix += f" — by {item['by']}"
+        if item.get("superseded") and status in _ACTIVE_STATUSES:
+            suffix += f" — {item['superseded']} (do not act on it)"
         lines.append(f"{'  ' * depth}{CHECKLIST_MARKS.get(status, '○')} {text}{suffix}")
     return "\n".join(lines)
 
@@ -299,6 +302,9 @@ def _todo_payload(items: List[Dict[str, str]], revision: Any, *, sync: Optional[
     summary: Dict[str, int] = {"total": len(items)}
     for status in ("pending", "in_progress", "completed", "cancelled"):
         summary[status] = sum(1 for i in items if i["status"] == status)
+    superseded = sum(1 for i in items if i.get("superseded") and i["status"] in _ACTIVE_STATUSES)
+    if superseded:
+        summary["superseded"] = superseded
 
     def dump(shown: List[Dict[str, str]]) -> str:
         body: Dict[str, Any] = {"todos": shown, "revision": revision, "summary": summary,

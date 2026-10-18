@@ -22,6 +22,8 @@ QUALITY_FEEDBACK_PATH = f"{MEMORY_PATH}/quality-feedback"
 LIMITATION_CHECK_PATH = f"{MEMORY_PATH}/limitations/check"
 # memory_check_manual_step: is this by-hand step automated, or does this line repeat a replaced note?
 MANUAL_STEP_CHECK_PATH = f"{MEMORY_PATH}/manual-step/check"
+# Check-before-acting: newest decisions about an entity (GET ?entity=).
+DECISION_CHECK_PATH = f"{MEMORY_PATH}/decisions/check"
 
 TASKS_PATH = "/tasks"
 TASK_CREATE_PATH = TASKS_PATH
