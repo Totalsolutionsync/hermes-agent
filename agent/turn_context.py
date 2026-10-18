@@ -826,6 +826,24 @@ def _merge_gateway_notes(
     )
 
 
+def _merge_pruned_skill_recall(
+    messages: List[Any], current_turn_user_idx: int, original_user_message: Any, plugin_user_context: str
+) -> str:
+    """A skill compression pruned earlier in this session is re-surfaced for THIS turn only when
+    the human's words touch its topic (deterministic keyword match, no LLM call). Rides the same
+    one-shot user-message channel as plugin context; ``""`` — zero bytes — when nothing matches."""
+    try:
+        from agent.pruned_skill_recall import pruned_skill_recall_note
+
+        note = pruned_skill_recall_note(messages, current_turn_user_idx, original_user_message)
+    except Exception:
+        logger.debug("pruned-skill recall failed", exc_info=True)
+        return plugin_user_context
+    if not note:
+        return plugin_user_context
+    return plugin_user_context + "\n\n" + note if plugin_user_context else note
+
+
 def _bind_interrupt_scope(agent: Any, ra) -> None:
     """Record the execution thread so interrupt()/clear_interrupt() scope the tool-level
     signal to THIS agent's thread; clear stale state, preserving a pending interrupt."""
@@ -1126,6 +1144,9 @@ def build_turn_context(
     )
     plugin_user_context = _merge_gateway_notes(
         agent, messages, current_turn_user_idx, plugin_user_context
+    )
+    plugin_user_context = _merge_pruned_skill_recall(
+        messages, current_turn_user_idx, original_user_message, plugin_user_context
     )
 
     _bind_interrupt_scope(agent, ra)
