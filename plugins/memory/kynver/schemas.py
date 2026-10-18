@@ -38,6 +38,13 @@ MEMORY_WRITE_SCHEMA = {
                     "it as unverified so it is rechecked instead of trusted after it goes stale."
                 ),
             },
+            "fixRef": {
+                "type": "string",
+                "description": (
+                    "For a limitation or blocker (X can't do Y, hold Z until W): the change that removes it, as a "
+                    "GitHub PR/issue/commit URL or owner/repo#123. Kynver retires the memory automatically when that fix ships."
+                ),
+            },
             "supersedes": {"type": "string", "description": "Key of an existing memory this content corrects and replaces."},
             "reason": {"type": "string", "description": "Why the old entry is being replaced. Required with supersedes."},
             "reasonClass": {
@@ -51,6 +58,23 @@ MEMORY_WRITE_SCHEMA = {
             },
         },
         "required": ["content"],
+    },
+}
+
+MEMORY_LIMITATION_CHECK_SCHEMA = {
+    "name": "kynver_memory_limitation_check",
+    "description": (
+        "Before saying something can't be done, or holding work because of a limitation, check it here. "
+        "Returns open (recorded blocker, fix not shipped), fixed (its fix merged and deployed: do not report it "
+        "as a blocker), or unverified (no live record: recheck the real system first)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The limitation as you would state it, e.g. 'hold Facebook for the AI label'."},
+            "subject": {"type": "string", "description": "Or a short subject, e.g. 'kariad facebook reel ai label'."},
+        },
+        "anyOf": [{"required": ["text"]}, {"required": ["subject"]}],
     },
 }
 
@@ -210,6 +234,7 @@ SKILL_GET_SCHEMA = {
 ALL_TOOL_SCHEMAS = [
     MEMORY_SEARCH_SCHEMA,
     MEMORY_WRITE_SCHEMA,
+    MEMORY_LIMITATION_CHECK_SCHEMA,
     TASK_CREATE_SCHEMA,
     TASK_UPDATE_SCHEMA,
     TASK_LIST_SCHEMA,

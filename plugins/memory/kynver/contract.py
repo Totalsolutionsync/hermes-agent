@@ -18,6 +18,8 @@ MEMORY_WRITE_PATH = MEMORY_PATH
 MEMORY_CORRECT_PATH = f"{MEMORY_PATH}/correct"
 # agent_os_record_memory_quality_feedback (operator access: owner or admin).
 QUALITY_FEEDBACK_PATH = f"{MEMORY_PATH}/quality-feedback"
+# Check-before-claiming for limitation (blocker) statements; POST {items:[{text}]} batches.
+LIMITATION_CHECK_PATH = f"{MEMORY_PATH}/limitations/check"
 
 TASKS_PATH = "/tasks"
 TASK_CREATE_PATH = TASKS_PATH
