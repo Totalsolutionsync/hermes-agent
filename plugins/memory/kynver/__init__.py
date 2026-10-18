@@ -19,6 +19,7 @@ from .agentos_bridge import (
     redact,
 )
 from .contract import (
+    LIMITATION_CHECK_PATH,
     MEMORY_CORRECT_PATH,
     MEMORY_WRITE_PATH,
     SESSION_OPEN_PATH,
@@ -1090,6 +1091,8 @@ class KynverMemoryProvider(MemoryProvider):
                 return self._handle_memory_search(args)
             if tool_name == "kynver_memory_write":
                 return self._handle_memory_write(args)
+            if tool_name == "kynver_memory_limitation_check":
+                return self._handle_limitation_check(args)
             if tool_name == "kynver_task_create":
                 return self._handle_task_create(args)
             if tool_name == "kynver_task_update":
@@ -1151,6 +1154,19 @@ class KynverMemoryProvider(MemoryProvider):
             "estimatedTokens": fitted.estimated_tokens,
             "sourceId": SOURCE_ID,
         })
+
+    def _handle_limitation_check(self, args: Dict[str, Any]) -> str:
+        text = str(args.get("text") or "").strip()
+        subject = str(args.get("subject") or "").strip()
+        if not text and not subject:
+            return tool_error("text or subject is required")
+        payload = self._require_client().post(
+            LIMITATION_CHECK_PATH,
+            _compact_dict({"text": text or None, "subject": subject or None}),
+            timeout=self._client_timeout,
+        )
+        self._mark_success("memory.limitation_check")
+        return _json_result({"success": True, **(payload if isinstance(payload, dict) else {"result": payload})})
 
     def _correct_memory(
         self,
@@ -1240,6 +1256,8 @@ class KynverMemoryProvider(MemoryProvider):
             meta: Dict[str, Any] = {"tool": "kynver_memory_write"}
             if args.get("volatile") is True:
                 meta["volatile"] = True
+            if str(args.get("fixRef") or "").strip():
+                meta["fixRef"] = str(args["fixRef"]).strip()
             result = self._write_memory(
                 content,
                 key=key,

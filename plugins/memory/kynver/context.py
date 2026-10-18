@@ -159,6 +159,12 @@ def _index_entry(item: dict[str, Any]) -> dict[str, str]:
 
 
 _UNTRUSTED_STATES = ("unverified", "stale_verification")
+_FIXED_TAG = "[FIXED by"
+
+
+def limitation_view(item: dict[str, Any]) -> dict[str, Any]:
+    view = item.get("limitation")
+    return view if isinstance(view, dict) else {}
 
 
 def staleness_flag(item: dict[str, Any]) -> str:
@@ -166,12 +172,32 @@ def staleness_flag(item: dict[str, Any]) -> str:
 
     Kynver's read-time gate tags volatile memories (outages, PR/deploy state) with a
     verificationState and laneWarning; dropping them makes a stale state read as truth.
+    Limitation (blocker) claims carry their own view: a fixed one must never read as a
+    live blocker, an unverified one must be rechecked.
     """
+    status = str(limitation_view(item).get("status") or "")
+    if status == "fixed":
+        return " (fixed limitation: history only, not a current blocker)"
+    if status == "unverified":
+        return " (unverified blocker with no linked fix: recheck before relying on it)"
     if str(item.get("verificationState") or "") not in _UNTRUSTED_STATES:
         return ""
     when = str(item.get("updatedAt") or item.get("createdAt") or "")[:10]
     noted = f" noted {when}" if when else ""
     return f" (current-state fact{noted}, unverified: recheck before acting on it)"
+
+
+def display_text(item: dict[str, Any]) -> str:
+    """Recalled text, led by a FIXED banner for a retired limitation even if the server omitted it."""
+    text = item_text(item)
+    view = limitation_view(item)
+    if view.get("status") != "fixed" or text.startswith(_FIXED_TAG):
+        return text
+    banner = str(view.get("banner") or "").strip()
+    if not banner:
+        when = str(view.get("fixedAt") or "")[:10]
+        banner = f"FIXED by {view.get('fixedBy') or 'a linked fix'}{f' on {when}' if when else ''}: this limitation no longer applies."
+    return f"[{banner}] {text}"
 
 
 def fit_whole_items(
@@ -188,7 +214,7 @@ def fit_whole_items(
     used = estimate_tokens(header)
 
     for item in items:
-        text = item_text(item)
+        text = display_text(item)
         if not text:
             omitted_items.append(item)
             continue
