@@ -20,6 +20,8 @@ MEMORY_CORRECT_PATH = f"{MEMORY_PATH}/correct"
 QUALITY_FEEDBACK_PATH = f"{MEMORY_PATH}/quality-feedback"
 # Check-before-claiming for limitation (blocker) statements; POST {items:[{text}]} batches.
 LIMITATION_CHECK_PATH = f"{MEMORY_PATH}/limitations/check"
+# memory_check_manual_step: is this by-hand step automated, or does this line repeat a replaced note?
+MANUAL_STEP_CHECK_PATH = f"{MEMORY_PATH}/manual-step/check"
 
 TASKS_PATH = "/tasks"
 TASK_CREATE_PATH = TASKS_PATH

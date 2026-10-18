@@ -20,6 +20,7 @@ from .agentos_bridge import (
 )
 from .contract import (
     LIMITATION_CHECK_PATH,
+    MANUAL_STEP_CHECK_PATH,
     MEMORY_CORRECT_PATH,
     MEMORY_WRITE_PATH,
     SESSION_OPEN_PATH,
@@ -1147,6 +1148,8 @@ class KynverMemoryProvider(MemoryProvider):
                 return self._handle_memory_write(args)
             if tool_name == "kynver_memory_limitation_check":
                 return self._handle_limitation_check(args)
+            if tool_name == "kynver_memory_check_manual_step":
+                return self._handle_check_manual_step(args)
             if tool_name == "kynver_task_create":
                 return self._handle_task_create(args)
             if tool_name == "kynver_task_update":
@@ -1208,6 +1211,14 @@ class KynverMemoryProvider(MemoryProvider):
             "estimatedTokens": fitted.estimated_tokens,
             "sourceId": SOURCE_ID,
         })
+
+    def _handle_check_manual_step(self, args: Dict[str, Any]) -> str:
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return tool_error("text is required")
+        payload = self._require_client().post(MANUAL_STEP_CHECK_PATH, {"text": text}, timeout=self._client_timeout)
+        self._mark_success("memory.check_manual_step")
+        return _json_result({"success": True, **(payload if isinstance(payload, dict) else {"result": payload})})
 
     def _handle_limitation_check(self, args: Dict[str, Any]) -> str:
         text = str(args.get("text") or "").strip()

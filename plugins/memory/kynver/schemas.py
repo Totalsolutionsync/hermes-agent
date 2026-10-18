@@ -61,6 +61,23 @@ MEMORY_WRITE_SCHEMA = {
     },
 }
 
+MEMORY_CHECK_MANUAL_STEP_SCHEMA = {
+    "name": "kynver_memory_check_manual_step",
+    "description": (
+        "Call this BEFORE asking Will to do anything by hand (run a script, click something, use Admin PowerShell). "
+        "Pass the request as you were about to make it. Returns automated=true with the memories saying it is "
+        "already automated or done by Forge (then do it yourself or skip it; do not ask Will), any retired "
+        "'Will must do it by hand' notes, and replaced notes the text repeats."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "The by-hand request, e.g. 'run the compaction script from Admin PowerShell'."},
+        },
+        "required": ["text"],
+    },
+}
+
 MEMORY_LIMITATION_CHECK_SCHEMA = {
     "name": "kynver_memory_limitation_check",
     "description": (
@@ -235,6 +252,7 @@ ALL_TOOL_SCHEMAS = [
     MEMORY_SEARCH_SCHEMA,
     MEMORY_WRITE_SCHEMA,
     MEMORY_LIMITATION_CHECK_SCHEMA,
+    MEMORY_CHECK_MANUAL_STEP_SCHEMA,
     TASK_CREATE_SCHEMA,
     TASK_UPDATE_SCHEMA,
     TASK_LIST_SCHEMA,

@@ -160,10 +160,17 @@ def _index_entry(item: dict[str, Any]) -> dict[str, str]:
 
 _UNTRUSTED_STATES = ("unverified", "stale_verification")
 _FIXED_TAG = "[FIXED by"
+_REPLACED_TAG = "[REPLACED by"
 
 
 def limitation_view(item: dict[str, Any]) -> dict[str, Any]:
     view = item.get("limitation")
+    return view if isinstance(view, dict) else {}
+
+
+def contradiction_view(item: dict[str, Any]) -> dict[str, Any]:
+    """Kynver's view of a note a newer one replaced (or is flagged against)."""
+    view = item.get("contradiction")
     return view if isinstance(view, dict) else {}
 
 
@@ -175,6 +182,11 @@ def staleness_flag(item: dict[str, Any]) -> str:
     Limitation (blocker) claims carry their own view: a fixed one must never read as a
     live blocker, an unverified one must be rechecked.
     """
+    replaced = contradiction_view(item)
+    if replaced.get("status") == "replaced":
+        return f" (replaced by {replaced.get('replacedBy') or 'a newer note'}: history only, not current)"
+    if replaced.get("status") == "needs_review" and replaced.get("side") == "older":
+        return " (a newer note may contradict this one: prefer the newer note)"
     status = str(limitation_view(item).get("status") or "")
     if status == "fixed":
         return " (fixed limitation: history only, not a current blocker)"
@@ -188,8 +200,12 @@ def staleness_flag(item: dict[str, Any]) -> str:
 
 
 def display_text(item: dict[str, Any]) -> str:
-    """Recalled text, led by a FIXED banner for a retired limitation even if the server omitted it."""
+    """Recalled text, led by a REPLACED / FIXED banner for a retired note even if the server omitted it."""
     text = item_text(item)
+    replaced = contradiction_view(item)
+    if replaced.get("status") == "replaced" and not text.startswith(_REPLACED_TAG):
+        banner = str(replaced.get("banner") or "").strip() or f"REPLACED by {replaced.get('replacedBy') or 'a newer note'}. Out of date; do not use as current."
+        return f"[{banner}] {text}"
     view = limitation_view(item)
     if view.get("status") != "fixed" or text.startswith(_FIXED_TAG):
         return text
