@@ -152,13 +152,32 @@ def _worker_memory_max_bytes() -> int:
 def _systemd_scope_argv(binary: str, unit_name: str, *argv: str) -> List[str]:
     """``systemd-run --user --scope`` argv shared by the probe and real spawns.
     ``--collect`` self-cleans the scope after exit; ``--unit`` names it for systemctl.
-    No ``OOMPolicy=``: transient scopes reject it on systemd <253 (#102486)."""
+    No ``OOMPolicy=``: transient scopes reject it on systemd <253 (#102486); see
+    ``restart_safe_gateway_child_argv`` for the version-gated exception."""
     return [
         binary, "--user", "--scope", "--quiet", "--unit", unit_name, "--collect",
         "--property", "MemoryAccounting=yes",
         "--property", f"MemoryMax={_worker_memory_max_bytes()}",
         "--", *argv,
     ]
+
+
+_SCOPE_OOM_POLICY_MIN_SYSTEMD = 253
+_scope_oom_policy_supported: Optional[bool] = None
+
+
+def _systemd_scope_oom_policy_supported() -> bool:
+    """True when this host's systemd accepts ``OOMPolicy=`` on a transient scope (>= 253)."""
+    global _scope_oom_policy_supported
+    if _scope_oom_policy_supported is None:
+        try:
+            first = subprocess.run(
+                ["systemctl", "--version"], capture_output=True, text=True, timeout=5,
+            ).stdout.split("\n", 1)[0]
+            _scope_oom_policy_supported = int(first.split()[1]) >= _SCOPE_OOM_POLICY_MIN_SYSTEMD
+        except Exception:  # noqa: BLE001 — unknown version: keep the safe default
+            _scope_oom_policy_supported = False
+    return _scope_oom_policy_supported
 
 
 def _default_user_runtime_dir() -> Path:
@@ -428,9 +447,17 @@ def restart_safe_gateway_child_argv(
             f"/run/user/{os.getuid()}/bus). On a system-level service install, run "  # windows-footgun: ok — behind the _IS_LINUX return above
             "`sudo loginctl enable-linger <gateway-user>` and restart the gateway."
         )
+    # A long-lived agent worker (cron job, kanban worker) runs heavy children: type checks,
+    # builds, test runners. With the default OOMPolicy=stop, the kernel killing one of them
+    # makes systemd stop the WHOLE scope, worker included, so it never records a result
+    # (18 Oct: a cron job's `tsc` + `vitest` hit the 4 GB cap and the run vanished silently).
+    # ``continue`` lets the worker see the child's failure and finish normally.
     scoped = _build_systemd_scope_argv(command, unit_suffix=unit_suffix)
     if scoped == command:
         return _degrade("systemd-run disappeared after the availability probe")
+    if _systemd_scope_oom_policy_supported():
+        separator = scoped.index("--")
+        scoped[separator:separator] = ["--property", "OOMPolicy=continue"]
     return GatewayChildDispatch("scoped", scoped)
 
 

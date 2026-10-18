@@ -3363,6 +3363,8 @@ def _wait_for_external_cron_worker_body(
     process: subprocess.Popen,
     *,
     execution_id: str,
+    job_id: Optional[str] = None,
+    fire_owner: Optional[str] = None,
 ) -> bool:
     """Preserve ``run_one_job``'s synchronous contract after handoff.
 
@@ -3400,7 +3402,15 @@ def _wait_for_external_cron_worker_body(
         # exception through the pre-handoff dispatch-failure path, which
         # would falsely assert that no side effect could have happened.
         recover_interrupted_executions()
-        if _is_terminal():
+        current = get_execution(execution_id)
+        if current and current.get("status") in _TERMINAL_STATES:
+            # Recovered to ``unknown`` = the worker never wrote the job's own result
+            # (mark_job_run + output), so last_status/last_error would stay null and a
+            # one-shot would look like it never ran (18 Oct: OOM in the job's scope).
+            if job_id is not None and current.get("status") == "unknown":
+                from cron.scheduler_worker_loss import record_worker_loss
+
+                record_worker_loss(job_id, fire_owner, execution_id, returncode)
             return True
         raise RuntimeError(
             "cron external worker exited before durable recovery could "
@@ -3414,10 +3424,11 @@ def _wait_for_external_cron_worker(
     execution_id: str,
     job_id: Optional[str] = None,
     handoff_files: tuple[Path, ...] = (),
+    fire_owner: Optional[str] = None,
 ) -> bool:
     try:
         return _wait_for_external_cron_worker_body(
-            process, execution_id=execution_id
+            process, execution_id=execution_id, job_id=job_id, fire_owner=fire_owner
         )
     finally:
         if job_id is not None:
@@ -3443,6 +3454,8 @@ def _launch_external_cron_worker(job: dict) -> bool:
     """
     execution_id = str(job["execution_id"])
     job_id = str(job["id"])
+    claim = job.get("fire_claim")
+    fire_owner = (str(claim.get("by") or "") if isinstance(claim, dict) else "") or None
     handoff_dir = _get_hermes_home() / "cron" / "external-workers"
     payload_path = handoff_dir / f"{execution_id}.json"
     ack_path = handoff_dir / f"{execution_id}.ready"
@@ -3583,6 +3596,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
                     process,
                     execution_id=execution_id,
                     job_id=job_id,
+                    fire_owner=fire_owner,
                     handoff_files=(payload_path, stderr_path),
                 )
             finally:
@@ -3600,6 +3614,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
                     process,
                     execution_id=execution_id,
                     job_id=job_id,
+                    fire_owner=fire_owner,
                     handoff_files=(payload_path, stderr_path),
                 )
             logger.info(
@@ -3615,6 +3630,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
                 process,
                 execution_id=execution_id,
                 job_id=job_id,
+                fire_owner=fire_owner,
                 handoff_files=(payload_path, stderr_path),
             )
         returncode = process.poll()
@@ -3654,6 +3670,7 @@ def _launch_external_cron_worker(job: dict) -> bool:
         process,
         execution_id=execution_id,
         job_id=job_id,
+        fire_owner=fire_owner,
         handoff_files=(payload_path, ack_path, stderr_path),
     )
 

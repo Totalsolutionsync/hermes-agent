@@ -75,6 +75,7 @@ def test_managed_gateway_worker_is_spawned_in_restart_safe_scope(
     monkeypatch.setattr("tools.process_registry._is_supervised_gateway_process", lambda: True)
     monkeypatch.setattr("tools.process_registry._systemd_run_user_scope_available", lambda: True)
     monkeypatch.setattr("tools.process_registry._worker_memory_max_bytes", lambda: 536_870_912)
+    monkeypatch.setattr("tools.process_registry._systemd_scope_oom_policy_supported", lambda: True)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/systemd-run")
 
     assert kbd._default_spawn(task, str(workspace)) == 4242
@@ -82,6 +83,7 @@ def test_managed_gateway_worker_is_spawned_in_restart_safe_scope(
     unit_index = captured_cmd.index("--unit")
     assert captured_cmd[unit_index + 1] == "hermes-worker-kanban-t_candidate_restart-run-23"
     assert "MemoryMax=536870912" in captured_cmd
+    assert "OOMPolicy=continue" in captured_cmd[: captured_cmd.index("--")]
     separator = captured_cmd.index("--")
     assert captured_cmd[separator + 1 : separator + 4] == ["hermes", "-p", "coder"]
     assert captured_cwd == str(workspace)
