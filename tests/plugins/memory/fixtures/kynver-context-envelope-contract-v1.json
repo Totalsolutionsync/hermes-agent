@@ -1,0 +1,47 @@
+{
+  "_meta": {
+    "description": "Kynver context-envelope contract fixture v1 — M3.5 multi-repo compatibility.",
+    "milestone": "M3.5",
+    "kynverCommit": "61b65e4681149d6ce335f17737715059493d1c4f",
+    "kynverPrHeadCommit": "7152742c183d1afb501c509338f61912f333d36f",
+    "kynverPr": "2130",
+    "hermesPluginVersion": "0.3.0",
+    "kynverMcpAgentOsVersion": "0.3.50",
+    "kynverRuntimeVersion": "0.1.158",
+    "adapterConfigMode": "enabled",
+    "adapterName": "hermes-memory-provider",
+    "endpointPath": "/api/agent-os/{slug}/context-envelope",
+    "notes": "Used by both Kynver-side and Hermes-side smoke tests. Changing this fixture is a breaking contract change requiring a version bump and matching adapter update. kynverCommit = merge SHA of Kynver PR #2130; kynverPrHeadCommit = head SHA at review time."
+  },
+  "contractVersion": "1.0",
+  "envelopeId": "env-m35-compat-fixture-v1",
+  "anchor": {
+    "type": "session",
+    "id": "hermes-compat-test-session",
+    "exists": false
+  },
+  "memories": [
+    {
+      "content": "Hermes Forge is the M3 dogfood adapter for Kynver context envelopes.",
+      "slug": "m3-dogfood-adapter",
+      "sourceId": "kynver:system",
+      "memoryType": "fact"
+    },
+    {
+      "content": "Kynver AgentOS/MARM is the authoritative context substrate for connected agents.",
+      "slug": "substrate-authority",
+      "sourceId": "kynver:system",
+      "memoryType": "fact"
+    }
+  ],
+  "recentSessions": [
+    {
+      "summary": "Implemented M3 read-only Hermes context-envelope provider.",
+      "id": "session-m3-impl"
+    }
+  ],
+  "currentFocus": null,
+  "persona": null,
+  "followUps": [],
+  "generatedAt": "2026-06-27T00:00:00Z"
+}

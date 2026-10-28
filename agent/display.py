@@ -166,9 +166,14 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
         return override
     try:
         from tools.registry import registry
-        return registry.get_emoji(tool_name, default="") or default
+        emoji = registry.get_emoji(tool_name, default="")
     except Exception:
-        return default
+        emoji = ""
+    # Memory-provider tool schemas are injected outside the registry.
+    return emoji or next((e for prefix, e in _PROVIDER_TOOL_EMOJIS if tool_name.startswith(prefix)), default)
+
+
+_PROVIDER_TOOL_EMOJIS = (("kynver_memory_", "🧠"), ("kynver_task_", "📋"), ("kynver_skill_", "🧩"))
 
 
 # ── Tool preview (one-line summary of a tool call's primary argument) ─────
@@ -437,6 +442,14 @@ def _preview_memory(args: dict, _max_len: int) -> str:
     return action
 
 
+def _preview_kynver_memory_write(args: dict, _max_len: int) -> str:
+    prefix = _oneline(args.get("memoryType", "fact") or "fact")
+    key = _oneline(args.get("key", "") or "")
+    if key:
+        prefix += f"/{key[:18]}"
+    return f"{prefix}: \"{_clip(_oneline(args.get('content', '')), 25)}\""
+
+
 def _preview_send_message(args: dict, _max_len: int) -> str:
     return t("display.preview.send_message_to", target=args.get("target", "?"),
              message=_tail_trunc(_oneline(args.get("message", "")), 20))
@@ -474,6 +487,7 @@ _PREVIEW_BUILDERS = {
     "process_manage": _preview_process_manage, "todo_list": _preview_todo_list,
     "terminal": _preview_shell("command"), "execute_code": _preview_shell("code"),
     "read_file": _preview_read_file, "memory": _preview_memory, "send_message": _preview_send_message,
+    "kynver_memory_write": _preview_kynver_memory_write,
     "skill_view": _preview_skill_view, "clarify": _preview_clarify,
     "session_search": lambda args, _m: t("display.preview.session_search_recall", query=_clip(_oneline(args.get("query", "")), 25)),
     "tool_call": _preview_bridge_call("tool_call"),
@@ -1156,10 +1170,11 @@ def _cute_web_extract(a: dict, _r) -> str:
 
 def _cute_todo_list(a: dict, result) -> str:
     todos_arg = a.get("todos")
-    total = done = 0
+    total = done = dropped = 0
     try:
         summary = (safe_json_loads(result) or {}).get("summary", {}) if result else {}
         total, done = summary.get("total", 0), summary.get("completed", 0)
+        dropped = summary.get("cancelled", 0) or 0
     except Exception:
         pass
     progress = t("display.cute.todo_progress", done=done, total=total)
@@ -1170,6 +1185,8 @@ def _cute_todo_list(a: dict, result) -> str:
                   else t("display.cute.todo_update_count", count=len(todos_arg)))
     else:
         detail = progress if total > 0 and done > 0 else t("display.cute.todo_count", count=len(todos_arg))
+    if dropped:
+        detail += f" · {dropped} ✗ dropped"
     return _cute_row("📋", "plan", detail)
 
 
