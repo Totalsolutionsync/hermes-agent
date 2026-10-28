@@ -166,7 +166,7 @@ class TestParseSystemdDuration:
 # check_systemd_timing_alignment
 # ---------------------------------------------------------------------------
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 class TestSystemdTimeoutStopLookup:
     """A system-level gateway has no ``--user`` unit; ``systemctl --user show`` still exits 0
     for it, reporting the manager default (90s) with ``LoadState=not-found``."""
