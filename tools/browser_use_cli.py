@@ -691,6 +691,14 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     if not code or not code.strip():
         return tool_error("No code provided. Pass Python that uses the pre-imported helpers, e.g. new_tab(\"https://example.com\") then print(page_info()).")
 
+    # Operator containment runs before CLI discovery and route resolution: either may open a
+    # consent-gated external Chrome connection.
+    if is_truthy_value(_read_browser_cfg().get("connection_freeze"), default=False):
+        return tool_error(
+            "Browser connection freeze is active; no browser transport was opened. "
+            "An operator must clear browser.connection_freeze before browser work can resume."
+        )
+
     # The verdict is carried into the route, never re-derived: the predicate resolves DNS, so a second
     # evaluation could relax the floor and still pick the cloud for a rebinding host.
     verdict = _code_url_verdict(code)

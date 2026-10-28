@@ -414,6 +414,9 @@ DEFAULT_CONFIG = {
         # browser tools; browser_exec is the only core browser. Config v52 drops `backend` (an `off`
         # gets a one-time notice) and copies AGENT_BROWSER_* from .env to the keys below; other
         # user values stay untouched.
+        # Emergency operator gate (local patch). Checked before browser route resolution or CLI launch so a
+        # consent-gated external Chrome cannot receive a fresh connection while containment is active.
+        "connection_freeze": False,
         "inactivity_timeout": 120,
         # Seconds a local Chromium launch may take to open its DevTools port; a launch always waits
         # at least 120 s (a cold first start unpacks the profile).
