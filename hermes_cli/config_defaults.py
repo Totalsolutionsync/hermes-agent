@@ -417,6 +417,9 @@ DEFAULT_CONFIG = {
         # Emergency operator gate (local patch). Checked before browser route resolution or CLI launch so a
         # consent-gated external Chrome cannot receive a fresh connection while containment is active.
         "connection_freeze": False,
+        # BU_NAMEs whose harness daemon an operator runs outside Hermes (local patch): browser_exec only
+        # attaches to them (BH_REQUIRE_EXISTING_DAEMON) and never spawns, reloads or stops them.
+        "external_daemons": [],
         "inactivity_timeout": 120,
         # Seconds a local Chromium launch may take to open its DevTools port; a launch always waits
         # at least 120 s (a cold first start unpacks the profile).

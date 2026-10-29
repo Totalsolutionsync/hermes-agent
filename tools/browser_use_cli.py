@@ -665,10 +665,30 @@ def _route_exec_current(env: dict, session: str, task_id: Optional[str], local: 
     return routed, route_err, sidecar, generation
 
 
+def _external_daemon_names() -> frozenset:
+    """``browser.external_daemons``: BU_NAMEs whose harness daemon an operator runs OUTSIDE Hermes (local
+    patch; e.g. a systemd user unit holding a consent-gated Chrome connection through a relay)."""
+    names = _read_browser_cfg().get("external_daemons") or []
+    if isinstance(names, str):
+        names = [names]
+    return frozenset(str(n).strip() for n in names if str(n).strip())
+
+
+def _is_external_daemon(env: dict) -> bool:
+    """True when this call drives an operator-owned daemon: its BU_NAME is listed in
+    ``browser.external_daemons`` and the call uses the shared default runtime dir (a served profile's
+    namespaced dir can never reach that daemon's socket)."""
+    if any(env.get(k) for k in ("BH_RUNTIME_DIR", "BH_TMP_DIR")):
+        return False
+    return env.get("BU_NAME", "default") in _external_daemon_names()
+
+
 def _reload_if_republished(env: dict, generation: int) -> None:
     """Stop this call's daemon if the profile published a new endpoint while it spawned on the old one."""
     if _live_generation() == generation:
         return
+    if _is_external_daemon(env):
+        return  # operator-owned: never stopped by Hermes
     daemon = daemon_identity(env)
     with _driven_daemons_lock:
         _driven_daemons.pop(daemon, None)
@@ -750,6 +770,13 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     if "BU_AUTOSPAWN" not in env and is_legacy_browser_use_cloud_config(_read_browser_cfg()):
         env["BU_AUTOSPAWN"] = "1"
 
+    # Operator-owned daemon (browser.external_daemons): attach only. The CLI must fail closed instead of
+    # spawning a competing daemon under the same name while the owner restarts, and Hermes must never stop
+    # it (shutdown, atexit, /browser connect) — that displaced the owner and made its unit flap.
+    external_daemon = _is_external_daemon(env)
+    if external_daemon:
+        env["BH_REQUIRE_EXISTING_DAEMON"] = "1"
+
     timeout = _clamp_timeout(timeout_s)
     started = time.time()
 
@@ -757,7 +784,8 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
         _attach_vault_supervisor(env, task_id)
         with _driven_daemons_lock:
             daemon = daemon_identity(env)
-            _driven_daemons[daemon] = hermes_home_key()
+            if not external_daemon:
+                _driven_daemons[daemon] = hermes_home_key()
         try:
             return {"proc": _run_cli_killing_process_group(cmd, code, env, timeout)}
         except subprocess.TimeoutExpired:
