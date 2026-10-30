@@ -2055,6 +2055,25 @@ def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=
     model slug and provider in place so the retry loop continues on the new backend; client
     construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
     from agent.fallback_cooldown import _arm_rate_limit_cooldown, switch_deferred_by_reset
+    # Record WHY we are leaving the current model (reason may be None for content-filter /
+    # refusal / empty-response callers, so also name the calling function).
+    try:
+        import os as _os
+        import sys as _sys
+        _f, _chain = _sys._getframe(1), []
+        while _f is not None and len(_chain) < 3:
+            _name = _f.f_code.co_name
+            if _name not in {"_forward", "wrapper", "_method", "<lambda>"}:
+                _chain.append(f"{_os.path.basename(_f.f_code.co_filename)}:{_name}:{_f.f_lineno}")
+            _f = _f.f_back
+        _caller = " <- ".join(_chain) or "?"
+    except Exception:
+        _caller = "?"
+    logger.warning(
+        "Fallback requested: model=%s provider=%s reason=%s caller=%s",
+        getattr(agent, "model", "?"), getattr(agent, "provider", "?"),
+        getattr(reason, "value", reason), _caller,
+    )
     if switch_deferred_by_reset(agent, reason, reset_at):
         return False
     cooldown_seconds = _arm_rate_limit_cooldown(agent, reason, reset_at=reset_at)
