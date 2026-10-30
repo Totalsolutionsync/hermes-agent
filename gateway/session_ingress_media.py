@@ -18,6 +18,7 @@ import sqlite3
 import stat
 import tempfile
 import threading
+import time
 from hermes_dir_acl import make_user_dir
 
 from hermes_state_runtime import ADMITTED_REQUEST_CONFLICT, RuntimeStoreError
@@ -502,10 +503,15 @@ def collect_unheld_api_images(db):
             'Skipped retained API image collection: %s is not the active profile store', db.db_path)
         return 0
     root = _media_root()
+    started = time.monotonic()
     try:
-        return release_unheld_media(db, [
+        released = release_unheld_media(db, [
             {'path': str(path), 'sha256': path.parent.name} for path in (root.glob('*/api_*') if root.is_dir() else ())
             if _API_IMAGE_NAME.fullmatch(path.name) and path.name[4:36] == path.parent.name[:32]])
+        elapsed = time.monotonic() - started
+        (logger.warning if elapsed > 10 else logger.info)(
+            'Retained API image collection released %d files in %.2fs', released, elapsed)
+        return released
     except sqlite3.DatabaseError:
         # Callers run after a committed delete or during startup recovery: neither may fail on it.
         # ``DatabaseError`` also covers a corrupt store, not only ``OperationalError`` (locked, limits).
@@ -513,7 +519,15 @@ def collect_unheld_api_images(db):
         return 0
 
 
-def _history_mentions(conn, references, after_id=0):
+_SCAN_SLICE_ROWS = 20000
+_HISTORY_SCAN_BUDGET_S = 120.0
+
+
+class HistoryScanBudgetExceeded(Exception):
+    pass
+
+
+def _history_mentions(conn, references, after_id=0, deadline=None):
     """Candidate paths any transcript row (id > after_id) mentions raw or JSON-escaped, in ONE
     messages pass. Rows are prefiltered in SQL on the literal text before each candidate's digest
     directory, so only rows that could name a candidate reach Python's exact substring test."""
@@ -529,11 +543,18 @@ def _history_mentions(conn, references, after_id=0):
     # The digests are ONE bound JSON array, never one ``instr`` term each: the statement's size
     # must not grow with the candidate count (SQLite's expression-depth limit fails at ~1000 terms).
     query = ('WITH digests(value) AS MATERIALIZED (SELECT value FROM json_each(?)) SELECT content FROM messages '
-             'WHERE EXISTS (SELECT 1 FROM digests WHERE instr(content, digests.value))' + (' AND id>?' if after_id else ''))
+             'WHERE id>? AND id<=? AND EXISTS (SELECT 1 FROM digests WHERE instr(content, digests.value))')
+    digests = json.dumps(prefixes)
+    top = conn.execute('SELECT coalesce(max(id), 0) FROM messages').fetchone()[0]
     mentioned = set()
-    for (content,) in conn.execute(query, (json.dumps(prefixes), *((after_id,) if after_id else ()))):
-        text = content.decode('utf-8', 'replace') if isinstance(content, bytes) else str(content)
-        mentioned.update(raw for needle, raw in needles.items() if needle in text)
+    # Id slices bound each statement and give the scan a deadline check between slices; an
+    # over-budget scan aborts so the caller keeps every file (the next sweep retries).
+    for low in range(after_id, top, _SCAN_SLICE_ROWS):
+        if deadline is not None and time.monotonic() > deadline:
+            raise HistoryScanBudgetExceeded
+        for (content,) in conn.execute(query, (digests, low, min(low + _SCAN_SLICE_ROWS, top))):
+            text = content.decode('utf-8', 'replace') if isinstance(content, bytes) else str(content)
+            mentioned.update(raw for needle, raw in needles.items() if needle in text)
     return mentioned
 
 
@@ -559,7 +580,11 @@ def release_unheld_media(db, references, *, retain_history=True):
             conn.execute('BEGIN')  # one snapshot: the id watermark and the scan agree
             try:
                 last_id = conn.execute('SELECT coalesce(max(id), 0) FROM messages').fetchone()[0]
-                seen = _history_mentions(conn, references)
+                seen = _history_mentions(conn, references, deadline=time.monotonic() + _HISTORY_SCAN_BUDGET_S)
+            except HistoryScanBudgetExceeded:
+                logger.warning('Media history scan exceeded %.0fs; keeping %d files for the next sweep',
+                               _HISTORY_SCAN_BUDGET_S, len(references))
+                return 0
             finally:
                 if conn.in_transaction:
                     conn.execute('ROLLBACK')

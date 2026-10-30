@@ -288,11 +288,29 @@ def recover_api_turns(adapter):
             recover_authority_api_turns(adapter, authority)
 
 
-def recover_authority_api_turns(adapter, authority):
-    from hermes_state_runtime import list_session_admissions
+def _schedule_unheld_media_collection(authority):
+    """Media GC scans the whole transcript store: off the event loop and never ahead of turn recovery."""
+    from gateway.session_authorities import owner_scope
     from gateway.session_ingress_media import collect_unheld_api_images
     import logging
-    collect_unheld_api_images(authority.db)
+
+    def collect():
+        with owner_scope(authority):
+            collect_unheld_api_images(authority.db)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        collect()
+        return
+    task = loop.run_in_executor(None, collect)
+    task.add_done_callback(lambda fut: fut.cancelled() or fut.exception() is None or logging.getLogger(__name__).error(
+        'Retained API image collection failed', exc_info=fut.exception()))
+
+
+def recover_authority_api_turns(adapter, authority):
+    from hermes_state_runtime import list_session_admissions
+    import logging
+    _schedule_unheld_media_collection(authority)
     from gateway.session_api_media import compact_settled_api_payloads
     compact_settled_api_payloads(authority.db)
     with authority.db._read_ctx() as conn:

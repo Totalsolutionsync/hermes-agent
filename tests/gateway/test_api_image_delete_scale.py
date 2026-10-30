@@ -58,7 +58,7 @@ _STORE_ERRORS = [sqlite3.OperationalError('database is locked'),
 
 
 def _exploding(error):
-    def explode(conn, references, after_id=0):
+    def explode(conn, references, after_id=0, deadline=None):
         raise error
     return explode
 
