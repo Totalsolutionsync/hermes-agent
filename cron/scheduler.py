@@ -160,6 +160,20 @@ def _failure_streak_nudge(job: dict) -> str:
     )
 
 
+_TRANSIENT_INFRA_SKIP_RE = re.compile(
+    r"cron admission missing|cron execution unverified|gateway connection failed", re.I)
+
+
+def _is_transient_infra_skip(job: dict, error: str) -> bool:
+    """True for a recurring job's 1st/2nd consecutive skipped fire caused by box load (admission
+    missing / unverified execution), which the next run recovers. 3rd in a row alerts as usual."""
+    if (job.get("schedule") or {}).get("kind") not in {"cron", "interval"}:
+        return False
+    if not _TRANSIENT_INFRA_SKIP_RE.search(error or ""):
+        return False
+    return int(job.get("failure_streak") or 0) + 1 < 3
+
+
 def _detect_gateway_code_skew() -> tuple[str, str] | None:
     """Boot-vs-disk revision skew for THIS process, or None. Test seam over
     ``gateway.code_skew.detect_code_skew``; a broken import must never take delivery down."""
@@ -2973,6 +2987,11 @@ def _compose_run_delivery(
             job, error or "", output_file=output_file
         )
         if incident_acked:
+            deliver_content = ""
+        elif _is_transient_infra_skip(job, error or ""):
+            # Forge local (29 Oct 2026, Will OK): a busy box that skips one or two fires of a
+            # recurring job (admission missing / execution unverified) recovers on the next run.
+            # Stay quiet until the 3rd skip in a row; the incident ledger + run output still record it.
             deliver_content = ""
         elif agent_declared:
             # The agent already diagnosed the failure in prose; the summarizer's substring
