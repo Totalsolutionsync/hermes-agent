@@ -263,6 +263,58 @@ class KynverAgentOSClient:
         except json.JSONDecodeError:
             return payload
 
+    def request_raw(
+        self,
+        method: str,
+        path: str,
+        body: Any | None = None,
+        *,
+        headers: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        slug: str | None = None,
+    ) -> tuple[int, dict[str, str], Any]:
+        """Like :meth:`request` but returns ``(status, response_headers, parsed)``.
+
+        Used by the background skill sync: it needs response headers (``ETag``),
+        a per-call timeout and ``304 Not Modified`` as a normal result. HTTP
+        errors other than 304 raise ``KynverAgentOSError`` (redacted).
+        """
+        if not self.config.enabled:
+            raise KynverAgentOSError("Kynver AgentOS is not configured")
+        url = f"{self.config.api_url}{self.api_path(path, slug=slug)}"
+        data = None if body is None else json.dumps(body).encode("utf-8")
+        req_headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.config.api_key}",
+            "User-Agent": "hermes-kynver-agentos/1.0",
+            "Accept-Encoding": "gzip",
+            **dict(headers or {}),
+        }
+        req = urllib.request.Request(url, data=data, headers=req_headers, method=method.upper())
+        effective_timeout = self.config.timeout if timeout is None else timeout
+        try:
+            with urllib.request.urlopen(req, timeout=effective_timeout) as res:  # nosec B310 - trusted Kynver origin
+                payload = _decoded_body(res).decode("utf-8", errors="replace")
+                status = res.status
+                resp_headers = {k.lower(): v for k, v in res.headers.items()}
+        except urllib.error.HTTPError as exc:
+            if exc.code == 304:
+                return 304, {k.lower(): v for k, v in exc.headers.items()}, None
+            detail = _decoded_body(exc).decode("utf-8", errors="replace") if exc.fp else str(exc)
+            raise KynverAgentOSError(
+                redact(f"Kynver AgentOS HTTP {exc.code}: {detail}"),
+                status=exc.code,
+                retry_after=_retry_after_header(exc),
+            ) from exc
+        except Exception as exc:
+            raise KynverAgentOSError(redact(f"Kynver AgentOS request failed: {exc}")) from exc
+        if not payload:
+            return status, resp_headers, None
+        try:
+            return status, resp_headers, json.loads(payload)
+        except json.JSONDecodeError:
+            return status, resp_headers, payload
+
     def get(self, path: str, *, slug: str | None = None, timeout: float | None = None) -> Any:
         return self.request("GET", path, slug=slug, timeout=timeout)
 

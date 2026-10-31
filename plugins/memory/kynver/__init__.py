@@ -331,6 +331,21 @@ class KynverMemoryProvider(MemoryProvider):
         self._active = bool(getattr(self._config, "enabled", True))
         if self._active and not self._sessions_disabled:
             self._open_session()
+        if self._active:
+            self._start_skill_sync(str(kwargs.get("agent_context") or "primary"))
+
+    def _start_skill_sync(self, agent_context: str) -> None:
+        """Start Kynver skill sync (H1-H3) when enabled in ``kynver.skills``. Never raises.
+
+        Only primary contexts run the background thread; cron/flush/subagent
+        contexts only feed the durable outbox (via the plugin hooks) so their
+        skill edits still reach Kynver from the primary process.
+        """
+        try:
+            from .skill_sync import service
+            service.start(self._client, primary=agent_context not in {"cron", "flush", "subagent"})
+        except Exception:
+            logger.debug("Kynver skill sync not started", exc_info=True)
 
     @property
     def _observe_only(self) -> bool:
@@ -1571,6 +1586,11 @@ def register(ctx) -> None:
 
     ctx.register_memory_provider(KynverMemoryProvider())
     register_operating_hooks(ctx)
+    try:
+        from .skill_sync.service import register_skill_sync_hooks
+        register_skill_sync_hooks(ctx)
+    except Exception:
+        logger.debug("Kynver skill sync hooks not registered", exc_info=True)
     if agentos_enabled() and kynver_operating_tools_enabled():
         logger.info(
             "Kynver operating tools enabled (default-on when AgentOS credentials are set; "
