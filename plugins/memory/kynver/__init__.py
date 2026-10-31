@@ -41,6 +41,7 @@ from .contract import (
     task_update_path,
     todo_to_task_record,
 )
+from .compaction_flush import CompactionFactFlusher, flush_enabled
 from .context import (
     fit_whole_items,
     item_fingerprint,
@@ -133,6 +134,7 @@ RUNTIME = "hermes"
 CALL_SIGN = "Forge"
 CONTEXT_TAG = "hermes-forge"
 SOURCE_ID = "hermes:forge"
+_COMPACTION_FLUSH_BLOCKED_CONTEXTS = frozenset({"cron", "subagent", "delegated", "delegate"})
 DEFAULT_SEARCH_LIMIT = 5
 
 
@@ -306,6 +308,14 @@ class KynverMemoryProvider(MemoryProvider):
         self._routed_memory_calls: Dict[str, Dict[str, Any]] = {}
         self._turn_number = 0
         self._feedback = QualityFeedbackReporter(self._require_client, spawn=spawn_context_thread)
+        self._agent_context = "primary"
+        # Memory freshness F15/F16: departing turns' durable facts reach Kynver on compression.
+        self._compaction_flush = CompactionFactFlusher(
+            self._require_client,
+            spawn=spawn_context_thread,
+            screen=_first_threat,
+            provenance=lambda: self._provenance(),
+        )
 
     @property
     def name(self) -> str:
@@ -324,6 +334,7 @@ class KynverMemoryProvider(MemoryProvider):
         self._agent_identity = str(kwargs.get("agent_identity") or "")
         self._agent_workspace = str(kwargs.get("agent_workspace") or "hermes")
         self._user_id = str(kwargs.get("user_id") or kwargs.get("user_id_alt") or "")
+        self._agent_context = str(kwargs.get("agent_context") or "primary").strip().lower() or "primary"
         self._standing_rules_cache = None  # re-read standing rules once per session
         if self._client is None:
             self._client = KynverAgentOSClient(self._config)
@@ -333,6 +344,8 @@ class KynverMemoryProvider(MemoryProvider):
             self._open_session()
         if self._active:
             self._start_skill_sync(str(kwargs.get("agent_context") or "primary"))
+        if self._compaction_flush_allowed:
+            self._compaction_flush.drain_if_pending()  # items a 429/outage left in the spool
 
     def _start_skill_sync(self, agent_context: str) -> None:
         """Start Kynver skill sync (H1-H3) when enabled in ``kynver.skills``. Never raises.
@@ -415,6 +428,33 @@ class KynverMemoryProvider(MemoryProvider):
             self._degraded_reason = ""
         if self._feedback_allowed:
             self._feedback.flush_if_pending()
+        if self._compaction_flush_allowed:
+            self._compaction_flush.drain_if_pending()
+
+    @property
+    def _compaction_flush_allowed(self) -> bool:
+        # cron ticks and subagents never write durable Kynver memory; flush (F16) may.
+        return (
+            self._active
+            and not self._observe_only
+            and not self._memory_disabled
+            and self._agent_context not in _COMPACTION_FLUSH_BLOCKED_CONTEXTS
+        )
+
+    def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
+        """Compression hook (memory freshness F15/F16): send the departing turns' durable
+        facts to Kynver (``hermes:forge:flush``, deduped at 0.92) on a background thread.
+
+        Fail-open: returns at once and never raises, so compression is never delayed or
+        blocked; a 429 spools the items for a later retry. Adds nothing to the summary."""
+        try:
+            if self._compaction_flush_allowed and flush_enabled():
+                self._compaction_flush.schedule(
+                    list(messages or []), session_id=self._agentos_session_id or self._session_id
+                )
+        except Exception:
+            logger.debug("Kynver compaction flush skipped", exc_info=True)
+        return ""
 
     @property
     def _feedback_allowed(self) -> bool:
@@ -734,6 +774,7 @@ class KynverMemoryProvider(MemoryProvider):
 
     def shutdown(self) -> None:
         self._feedback.wait_idle(POST_TIMEOUT_SECONDS)
+        self._compaction_flush.wait_idle(POST_TIMEOUT_SECONDS)
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         if self._sessions_disabled or self._observe_only:
@@ -775,6 +816,7 @@ class KynverMemoryProvider(MemoryProvider):
         self.on_session_end([])
         if reset and new_session_id:
             self._seen_memory_fingerprints.pop(new_session_id, None)
+            self._compaction_flush.reset_session()
         self._session_id = new_session_id or self._session_id
         self._agentos_session_id = ""
         if self._active and not self._sessions_disabled:
@@ -1580,12 +1622,31 @@ class KynverMemoryProvider(MemoryProvider):
         })
 
 
+def _register_compaction_flush_task(ctx) -> None:
+    """Own aux route for the compaction fact flush; follows ``auxiliary.compression`` until pinned."""
+    register_task = getattr(ctx, "register_auxiliary_task", None)
+    if not callable(register_task):
+        return
+    try:
+        from .compaction_flush import TASK_KEY
+
+        register_task(
+            TASK_KEY,
+            display_name="Kynver compaction flush",
+            description="durable facts from compressed turns",
+            inherit_from="compression",
+        )
+    except Exception:
+        logger.debug("Kynver compaction flush aux task not registered", exc_info=True)
+
+
 def register(ctx) -> None:
     from .operating_config import kynver_operating_tools_enabled
     from .operating_hooks import register_operating_hooks
 
     ctx.register_memory_provider(KynverMemoryProvider())
     register_operating_hooks(ctx)
+    _register_compaction_flush_task(ctx)
     try:
         from .skill_sync.service import register_skill_sync_hooks
         register_skill_sync_hooks(ctx)
