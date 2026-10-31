@@ -1652,6 +1652,11 @@ def register(ctx) -> None:
         register_skill_sync_hooks(ctx)
     except Exception:
         logger.debug("Kynver skill sync hooks not registered", exc_info=True)
+    try:
+        from .model_route_guard import register_model_route_guard
+        register_model_route_guard(ctx)
+    except Exception:
+        logger.debug("Kynver /model route guard not registered", exc_info=True)
     if agentos_enabled() and kynver_operating_tools_enabled():
         logger.info(
             "Kynver operating tools enabled (default-on when AgentOS credentials are set; "
