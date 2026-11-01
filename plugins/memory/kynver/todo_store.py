@@ -75,6 +75,7 @@ class KynverTodoStore(BaseTodoStore):
         scope: ScopeSource = None,
         plan_resolver: Optional[TodoPlanResolver] = None,
         label: LabelSource = None,
+        chat_key: LabelSource = None,
         actor_source: str = "hermes-chat",
         scope_for_session: Optional[Callable[[str], Optional[str]]] = None,
     ):
@@ -98,6 +99,7 @@ class KynverTodoStore(BaseTodoStore):
         self._scope_confirmed = False
         self._plan_resolver = plan_resolver
         self._label_source = label
+        self._chat_key_source = chat_key
         self._actor_source = actor_source
         self._scope_for_session = scope_for_session
         self._session_api = True
@@ -305,6 +307,13 @@ class KynverTodoStore(BaseTodoStore):
             raw = None
         return " ".join(str(raw).split())[:200] if raw else None
 
+    def _chat_key(self) -> Optional[str]:
+        source = self._chat_key_source
+        try:
+            return (source() if callable(source) else source) or None
+        except Exception:
+            return None
+
     def _adopt_ref(self, ref: str) -> str:
         """``session:<Hermes session id>`` → ``session:hermes:<todo scope>`` (the id's lineage root)."""
         if not ref.startswith(SESSION_REF_PREFIX):
@@ -331,6 +340,7 @@ class KynverTodoStore(BaseTodoStore):
             label=self._label(),
             actor_source=self._actor_source,
             task_id=self._linkage.task_id,
+            chat_key=self._chat_key(),
         )
 
     def _accept(self, view: SessionView) -> list[dict[str, str]]:

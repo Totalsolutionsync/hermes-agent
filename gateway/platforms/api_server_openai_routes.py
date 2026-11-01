@@ -937,6 +937,8 @@ class OpenAICompatRoutesMixin:
             session_id, lookup_error = await self._implicit_chat_session(request, session_id)
             if lookup_error is not None:
                 return lookup_error
+        from gateway.platforms.api_server_chat_key import remember_chat_key
+        remember_chat_key(request, session_id)
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())

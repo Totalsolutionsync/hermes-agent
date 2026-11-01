@@ -196,6 +196,7 @@ def configure_agent(
         scope=lambda: session_todo_scope(agent),
         plan_resolver=shared_plan_resolver(client, linkage),
         label=lambda: todo_session_label(agent),
+        chat_key=lambda: getattr(agent, "_kynver_chat_key", None),
         actor_source=todo_actor_source(agent),
         scope_for_session=lambda session_id: scope_for_session_id(agent, session_id),
     )

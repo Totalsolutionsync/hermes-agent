@@ -861,6 +861,8 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
                 self._run_statuses, self._run_owners)
             return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
         self._run_idempotency_ids.add(run_id)
+    from gateway.platforms.api_server_chat_key import remember_chat_key
+    remember_chat_key(request, session_id)
     launch = _RunLaunch(
         self, run_id, q, session_id, gateway_session_key, _declared_selected, user_message,
         conversation_history, session_history_delivery,
