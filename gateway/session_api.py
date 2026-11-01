@@ -147,6 +147,24 @@ def bind_api_session(authority, session_id, *, hosted_dispatch=None, declared_ke
                                     declared_key=declared_key, caller_key=caller_key, walked_from=walked_from))
 
 
+def telegram_continue_allowed(authority, row):
+    """May an API turn continue this stored Telegram session? Only with the explicit
+    ``gateway.api_server.allow_telegram_session_continue`` switch (default off) and only for a
+    Telegram DM whose own user the gateway authorizes (the owner/allowlist): the API key is the
+    owner's credential, and any other Telegram row (group, unauthorized or unknown user) stays refused."""
+    if row is None or row['source'] != 'telegram':
+        return False
+    from hermes_cli.config import cfg_get, load_config
+    if cfg_get(load_config(), 'gateway', 'api_server', 'allow_telegram_session_continue', default=False) is not True:
+        return False
+    try:
+        origin = SessionSource.from_dict(json.loads(row['origin_json']))
+    except (TypeError, ValueError, KeyError):
+        return False
+    return (origin.platform == Platform.TELEGRAM and origin.chat_type == 'dm' and bool(origin.user_id)
+            and bool(authority.runner._is_user_authorized(origin)))
+
+
 def bind_api_steps(authority, session_id, *, hosted_dispatch=None, declared_key=None, caller_key=None,
                    walked_from=None):
     """``bind_api_session`` as write steps (``run_steps``): the binding transaction is yielded.
@@ -172,9 +190,13 @@ def bind_api_steps(authority, session_id, *, hosted_dispatch=None, declared_key=
             raise RuntimeStoreError('admission_conflict')
         storage_source, title = 'bot_room', f'Group: {dispatch.room_id}'
     from gateway.session_history_mount import is_history_mount
-    if session_id in authority.sessions and not is_history_mount(authority.sessions[session_id]):
+    stored = authority.db.get_session(session_id)
+    if hosted_dispatch is None and telegram_continue_allowed(authority, stored):
+        # The Telegram row keeps its own routing; the API binding only adds a route to it.
+        storage_source = 'telegram'
+    elif session_id in authority.sessions and not is_history_mount(authority.sessions[session_id]):
         if (authority.sessions[session_id].source.platform != Platform.API_SERVER
-                or authority.db.get_session(session_id)['source'] != storage_source):
+                or stored['source'] != storage_source):
             raise RuntimeStoreError('permission_denied')
     # An API session is the shared-listener row of the transport matrix: the launch profile's
     # ``api_server`` adapter receives ``/p/<name>/`` and answers it, while the turn RUNS under the
@@ -193,6 +215,8 @@ def bind_api_steps(authority, session_id, *, hosted_dispatch=None, declared_key=
                'route': route, 'entry': entry.to_dict()}
     if declared_key:
         receipt['declared_key'] = declared_key
+    if storage_source == 'telegram':
+        receipt['storage_source'] = storage_source
     if room_identity is not None:
         receipt.update(storage_source=storage_source, room_identity=room_identity)
         if room_generation:
@@ -237,7 +261,7 @@ def bind_api_steps(authority, session_id, *, hosted_dispatch=None, declared_key=
         # the declared-key registry above already refused a key owned by another session, and any
         # other stored key (another conversation's, a foreign route) still conflicts.
         legacy_key = declared_key or caller_key
-        if row is not None and row['session_key'] not in (None, '', route):
+        if storage_source != 'telegram' and row is not None and row['session_key'] not in (None, '', route):
             if not legacy_key or row['session_key'] != legacy_key:
                 raise RuntimeStoreError('admission_conflict')
             # The rewrite below replaces the stamped key with the route: the registry keeps it,
@@ -257,8 +281,9 @@ def bind_api_steps(authority, session_id, *, hosted_dispatch=None, declared_key=
         conn.execute('''INSERT INTO sessions(id,source,title,hidden,started_at) VALUES(?,?,?,?,?)
                         ON CONFLICT(id) DO NOTHING''', (session_id, storage_source, title,
                                                        int(storage_source == 'bot_room'), now.timestamp()))
-        conn.execute('UPDATE sessions SET session_key=?,chat_id=?,user_id=?,chat_type=?,origin_json=? WHERE id=?',
-                     (route, session_id, source.user_id, 'dm', _json(source.to_dict()), session_id))
+        if storage_source != 'telegram':
+            conn.execute('UPDATE sessions SET session_key=?,chat_id=?,user_id=?,chat_type=?,origin_json=? WHERE id=?',
+                         (route, session_id, source.user_id, 'dm', _json(source.to_dict()), session_id))
         conn.execute("INSERT INTO gateway_routing(scope,session_key,entry_json,updated_at) VALUES('',?,?,?) "
                      'ON CONFLICT(scope,session_key) DO UPDATE SET entry_json=excluded.entry_json',
                      (route, _json(entry.to_dict()), now.timestamp()))
@@ -314,7 +339,8 @@ def restore_api_session(authority, session_id):
     if (receipt['session_id'] != session_id or entry.session_id != session_id
             or source.platform != Platform.API_SERVER or source.chat_id != session_id
             or row is None or row['source'] != receipt.get('storage_source', 'api_server')
-            or (row['session_key'], row['chat_id'], row['user_id']) != (entry.session_key, session_id, source.user_id)
+            or (receipt.get('storage_source') != 'telegram'
+                and (row['session_key'], row['chat_id'], row['user_id']) != (entry.session_key, session_id, source.user_id))
             or entry.session_key != authority.runner.session_store._generate_session_key(source)):
         raise RuntimeStoreError('admission_conflict')
     if receipt.get('storage_source') == 'bot_room':
