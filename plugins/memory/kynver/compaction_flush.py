@@ -258,6 +258,38 @@ def _band(confidence: float, *, held: bool) -> str:
     return "medium" if held and band == "high" else band
 
 
+
+# -- security lane screening -----------------------------------------------------------
+
+_SECURITY_CONTENT_RE = re.compile(
+    r"(security\s*fortress|red[\s-]*team|attack\s*simulation|pentest|vulnerability\s*scan|"
+    r"exploit\s*test|security\s*probe|fortress\s*probe|fortress\s*finding|"
+    r"security\s*finding|attack\s*vector|threat\s*model|fortress\s*daily|"
+    r"security\s*report|red[\s-]*team\s*test)",
+    re.IGNORECASE,
+)
+
+_SECURITY_SOURCE_RE = re.compile(
+    r"^(fortress:|security-fortress:|attack-simulation:|red-team:|security-probe:|hermes:forge:flush)",
+    re.IGNORECASE,
+)
+
+_SECURITY_SLUG_RE = re.compile(
+    r"(^|[-_:/. ])(fortress|red\.team|attack\.sim|security\.probe|pentest|vulnerability\.scan|exploit\.test)([-_:/. ]|$)",
+    re.IGNORECASE,
+)
+
+
+def is_security_lane_content(text: str, slug: str = "", source_id: str = "") -> bool:
+    """Return True if the content appears to be security/red-team material."""
+    if _SECURITY_SOURCE_RE.search(source_id):
+        return True
+    if _SECURITY_SLUG_RE.search(slug):
+        return True
+    if _SECURITY_CONTENT_RE.search(text[:600]):
+        return True
+    return False
+
 def build_memory_body(item: dict[str, Any], *, session_id: str, provenance: dict[str, Any]) -> dict[str, Any]:
     """POST /memory body for one item (the Hermes side of Kynver's F16 contract)."""
     held = bool(item.get("fromToolOutput"))
@@ -288,6 +320,11 @@ def build_memory_body(item: dict[str, Any], *, session_id: str, provenance: dict
         "dedupeAgainstSimilar": FLUSH_DEDUPE_SIMILARITY,
         "metadata": metadata,
     }
+    # Security lane content: hide from recall so Claude chats do not see it.
+    if is_security_lane_content(item["text"], item.get("slug", ""), FLUSH_SOURCE_ID):
+        metadata["hiddenFromRecall"] = True
+        metadata["securityLane"] = True
+
     if held:
         # Rests only on tool output (untrusted text): held for review, like the chat fold.
         metadata["derivedFromToolOutput"] = True
