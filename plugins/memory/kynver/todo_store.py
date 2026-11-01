@@ -7,7 +7,7 @@ import logging
 import time
 import uuid
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Optional
 
 from tools.todo_tool import BaseTodoStore, TodoStore
 
@@ -30,8 +30,8 @@ from .todo_session import (
 
 logger = logging.getLogger(__name__)
 
-ScopeSource = Union[str, Callable[[], Optional[str]], None]
-LabelSource = Union[str, Callable[[], Optional[str]], None]
+ScopeSource = str | Callable[[], Optional[str]] | None
+LabelSource = str | Callable[[], Optional[str]] | None
 # An older Kynver without /todos/session is asked again after this long.
 _SESSION_API_RETRY_SECONDS = 600.0
 
@@ -85,9 +85,9 @@ class KynverTodoStore(BaseTodoStore):
         self._retry_interval_seconds = max(0.0, retry_interval_seconds)
         self._clock = clock
         self._degraded_at = self._clock() if degraded else None
-        self._pending_writes: List[tuple[str, List[Dict[str, Any]], bool]] = []
+        self._pending_writes: list[tuple[str, list[dict[str, Any]], bool]] = []
         self._local = TodoStore()
-        self._last_items: List[Dict[str, str]] = []
+        self._last_items: list[dict[str, str]] = []
         self._revision = 0
         self._scope_source = scope
         self._fallback_scope = f"local-{uuid.uuid4().hex[:12]}"
@@ -102,8 +102,8 @@ class KynverTodoStore(BaseTodoStore):
         self._scope_for_session = scope_for_session
         self._session_api = True
         self._session_api_missing_at: Optional[float] = None
-        self._sync: Dict[str, Any] = {}
-        self._since: Dict[str, float] = {}
+        self._sync: dict[str, Any] = {}
+        self._since: dict[str, float] = {}
         self._degraded_reason = ""
 
     def _can_project(self) -> bool:
@@ -116,7 +116,7 @@ class KynverTodoStore(BaseTodoStore):
         return self._plan_resolver.linkage_for(scope)
 
     def _promoted_linkage(
-        self, scope: str, items: List[Dict[str, str]], linkage: OperatingLinkage
+        self, scope: str, items: list[dict[str, str]], linkage: OperatingLinkage
     ) -> OperatingLinkage:
         """``linkage`` moved to the session's own plan when this list has outgrown the Inbox.
         A failed promotion leaves the list on the Inbox; the next write asks again."""
@@ -168,7 +168,7 @@ class KynverTodoStore(BaseTodoStore):
             return True
         return self._clock() - self._degraded_at >= self._retry_interval_seconds
 
-    def _try_recover(self) -> Optional[List[Dict[str, str]]]:
+    def _try_recover(self) -> Optional[list[dict[str, str]]]:
         """Retry a read after the cooldown and clear transient degradation."""
 
         if not self._recovery_due() or not self._can_project():
@@ -222,13 +222,13 @@ class KynverTodoStore(BaseTodoStore):
         logger.info("Kynver todo store recovered; AgentOS plan progress is available")
         return items
 
-    def _publish(self, items: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    def _publish(self, items: list[dict[str, str]]) -> list[dict[str, str]]:
         if items != self._last_items:
             self._revision += 1
             self._last_items = [dict(item) for item in items]
         return items
 
-    def read(self) -> List[Dict[str, str]]:
+    def read(self) -> list[dict[str, str]]:
         if self._use_session_api():
             try:
                 return self._publish(self._session_read())
@@ -238,7 +238,7 @@ class KynverTodoStore(BaseTodoStore):
         self._scope_confirmed = True
         return self._publish(items)
 
-    def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]:
+    def write(self, todos: list[dict[str, Any]], merge: bool = False) -> list[dict[str, str]]:
         if self._use_session_api():
             try:
                 return self._publish(self._session_write(todos, merge))
@@ -248,7 +248,7 @@ class KynverTodoStore(BaseTodoStore):
         self._scope_confirmed = True
         return self._publish(items)
 
-    def adopt(self, ref: str) -> List[Dict[str, str]]:
+    def adopt(self, ref: str) -> list[dict[str, str]]:
         """Make an existing shared plan this session's list (work handed over): a plan id,
         title or Kynver link, or ``session:<Hermes session id>`` for another chat's list."""
         ref = (ref or "").strip()
@@ -268,13 +268,13 @@ class KynverTodoStore(BaseTodoStore):
             raise PreTransitionError(f"Kynver unreachable, could not pick up the plan: {_kynver_message(exc)}")
         return self._publish(self._accept(view))
 
-    def in_progress_since(self) -> Dict[str, float]:
+    def in_progress_since(self) -> dict[str, float]:
         """When each in-progress item went in progress (from Kynver; the cache's own while offline)."""
         if self._sync.get("via") == "kynver":
             return dict(self._since)
         return self._local.in_progress_since()
 
-    def sync_info(self) -> Dict[str, Any]:
+    def sync_info(self) -> dict[str, Any]:
         """Where the last list came from, for the todo result: the Kynver plan, or the local
         cache with the reason (Kynver down / rate-limited) and per-item write errors."""
         return dict(self._sync)
@@ -320,7 +320,7 @@ class KynverTodoStore(BaseTodoStore):
                 logger.debug("Kynver todo: scope lookup failed for %s: %s", rest, exc)
         return f"{SESSION_REF_PREFIX}hermes:{scope or normalize_todo_scope(rest)}"
 
-    def _session(self, *, todos: Optional[List[Dict[str, Any]]] = None, merge: bool = True,
+    def _session(self, *, todos: Optional[list[dict[str, Any]]] = None, merge: bool = True,
                  adopt: Optional[str] = None, scope: Optional[str] = None) -> SessionView:
         return session_call(
             self._client,
@@ -333,7 +333,7 @@ class KynverTodoStore(BaseTodoStore):
             task_id=self._linkage.task_id,
         )
 
-    def _accept(self, view: SessionView) -> List[Dict[str, str]]:
+    def _accept(self, view: SessionView) -> list[dict[str, str]]:
         """Kynver's list wins; the cache keeps it (plus local-only nesting) for outages."""
         parents = {i["id"]: i["parent"] for i in self._local.read() if i.get("parent")}
         items = []
@@ -347,7 +347,7 @@ class KynverTodoStore(BaseTodoStore):
         self._degraded = False
         self._degraded_at = None
         self._since = dict(view.since)
-        sync: Dict[str, Any] = {"via": "kynver"}
+        sync: dict[str, Any] = {"via": "kynver"}
         if view.plan:
             sync["plan"] = view.plan.get("title") or view.plan.get("id")
             if view.plan.get("inbox"):
@@ -361,7 +361,7 @@ class KynverTodoStore(BaseTodoStore):
         self._sync = sync
         return items
 
-    def _fallback(self, reason: str) -> List[Dict[str, str]]:
+    def _fallback(self, reason: str) -> list[dict[str, str]]:
         self._sync = {
             "via": "local cache",
             "note": f"Kynver unreachable ({reason}); this is the chat's last known list. "
@@ -381,7 +381,7 @@ class KynverTodoStore(BaseTodoStore):
                 logger.warning("Kynver todo: dropped a queued write Kynver refused: %s", exc)
             self._pending_writes.pop(0)
 
-    def _session_read(self) -> List[Dict[str, str]]:
+    def _session_read(self) -> list[dict[str, str]]:
         self._current_scope()
         if self._degraded and not self._recovery_due():
             return self._fallback(_kynver_message(self._degraded_reason) if self._degraded_reason else "retrying")
@@ -396,7 +396,7 @@ class KynverTodoStore(BaseTodoStore):
             self._mark_degraded(str(exc))
             return self._fallback(_kynver_message(exc))
 
-    def _session_write(self, todos: List[Dict[str, Any]], merge: bool) -> List[Dict[str, str]]:
+    def _session_write(self, todos: list[dict[str, Any]], merge: bool) -> list[dict[str, str]]:
         scope = self._current_scope()
         self._local.write(todos, merge=merge)
         batch = (scope, [dict(item) for item in todos if isinstance(item, dict)], merge)
@@ -423,12 +423,12 @@ class KynverTodoStore(BaseTodoStore):
             self._mark_degraded(str(exc))
             return self._fallback(_kynver_message(exc))
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         """State as of the last read/write/restore — no AgentOS round trip, so todo_tool and
         the TUI can pair it with the list they just got."""
         return {"todos": [dict(item) for item in self._last_items], "revision": self._revision}
 
-    def restore(self, todos: List[Dict[str, Any]], *, revision: Any = 0) -> List[Dict[str, str]]:
+    def restore(self, todos: list[dict[str, Any]], *, revision: Any = 0) -> list[dict[str, str]]:
         """Seed the local cache from a trusted snapshot (history hydration). Nothing is
         projected to AgentOS: replaying history must not rewrite plan rows."""
         self._current_scope()
@@ -438,7 +438,7 @@ class KynverTodoStore(BaseTodoStore):
         self._last_items = [dict(item) for item in items]
         return items
 
-    def _read_items(self) -> List[Dict[str, str]]:
+    def _read_items(self) -> list[dict[str, str]]:
         scope = self._current_scope()
         if self._degraded:
             recovered = self._try_recover()
@@ -468,7 +468,7 @@ class KynverTodoStore(BaseTodoStore):
             self._mark_degraded(str(exc))
             return self._local.read()
 
-    def _write_items(self, todos: List[Dict[str, Any]], merge: bool) -> List[Dict[str, str]]:
+    def _write_items(self, todos: list[dict[str, Any]], merge: bool) -> list[dict[str, str]]:
         scope = self._current_scope()
         local_items = self._local.write(todos, merge=merge)
         write_batch = (scope, [dict(item) for item in todos], merge)
@@ -526,7 +526,7 @@ class KynverTodoStore(BaseTodoStore):
 
     def format_for_injection(self) -> Optional[str]:
         base = TodoStore()
-        base._items = self.read()  # noqa: SLF001 — reuse formatter
+        base._items = self.read()
         text = base.format_for_injection()
         if self._degraded and text:
             return text + "\n[Kynver todo: degraded — using local fallback cache]"

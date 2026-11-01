@@ -80,11 +80,11 @@ class TodoPlanResolver:
         self._enabled = enabled
         self._ttl = max(0.0, ttl_seconds)
         self._clock = clock
-        self._cache: "OrderedDict[str, tuple[ResolvedTodoPlan, float]]" = OrderedDict()
+        self._cache: OrderedDict[str, tuple[ResolvedTodoPlan, float]] = OrderedDict()
         self._endpoint_missing_at: Optional[float] = None
         # scope -> when a promote request came back still on the Inbox (Kynver without
         # promote support); not retried within the TTL.
-        self._promote_refused: "OrderedDict[str, float]" = OrderedDict()
+        self._promote_refused: OrderedDict[str, float] = OrderedDict()
 
     def legacy(self) -> Optional[ResolvedTodoPlan]:
         plan_id = self._linkage.plan_id
@@ -177,7 +177,7 @@ class TodoPlanResolver:
         return replace(self._linkage, plan_id=plan.plan_id if plan else None)
 
 
-_SHARED: "dict[tuple, TodoPlanResolver]" = {}
+_SHARED: dict[tuple, TodoPlanResolver] = {}
 
 
 def shared_plan_resolver(client: KynverAgentOSClient, linkage: OperatingLinkage) -> TodoPlanResolver:

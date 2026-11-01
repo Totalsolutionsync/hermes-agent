@@ -46,7 +46,7 @@ def _ledger_path(today: Optional[dt.date] = None):
 
 def spent_today_usd(provider: Any, today: Optional[dt.date] = None) -> float:
     try:
-        data = json.loads(_ledger_path(today).read_text(encoding="utf-8"))
+        data = json.loads(_ledger_path(today).read_text(encoding="utf-8-sig"))
         return float(data.get(_provider_key(provider), 0.0))
     except Exception:
         return 0.0
@@ -72,7 +72,7 @@ def record(provider: Any, amount_usd: Optional[float], today: Optional[dt.date] 
     try:
         from utils import atomic_json_write
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception:
             data = {}
         key = _provider_key(provider)

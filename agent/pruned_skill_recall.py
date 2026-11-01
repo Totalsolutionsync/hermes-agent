@@ -26,7 +26,7 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Iterable, Optional, Sequence
 
 MAX_RECALLED_SKILLS = 2
 EXCERPT_MAX_CHARS = 400
@@ -100,8 +100,8 @@ def _stem(word: str) -> str:
     return word
 
 
-def _term_counts(text: str) -> Dict[str, int]:
-    out: Dict[str, int] = {}
+def _term_counts(text: str) -> dict[str, int]:
+    out: dict[str, int] = {}
     for word in _WORD_RE.findall((text or "").lower()):
         if len(word) < _MIN_TERM_CHARS or word in _STOPWORDS:
             continue
@@ -117,8 +117,8 @@ def _terms(text: str) -> set[str]:
 @dataclass(frozen=True)
 class _Step:
     text: str
-    counts: Tuple[Tuple[str, int], ...]
-    sentences: Tuple[frozenset, ...]
+    counts: tuple[tuple[str, int], ...]
+    sentences: tuple[frozenset, ...]
 
     @property
     def terms(self) -> frozenset:
@@ -128,13 +128,13 @@ class _Step:
 @dataclass(frozen=True)
 class _SkillIndex:
     name: str
-    steps: Tuple[_Step, ...]
+    steps: tuple[_Step, ...]
     terms: frozenset
 
 
-def _split_steps(body: str) -> List[str]:
+def _split_steps(body: str) -> list[str]:
     """Headings, numbered steps and bullets each start a step; continuation lines join it."""
-    steps: List[str] = []
+    steps: list[str] = []
     for raw in _FENCED_CODE_RE.sub("\n", body).splitlines():
         line = raw.rstrip()
         if not line.strip():
@@ -152,7 +152,7 @@ def _build_index(path: Path) -> Optional[_SkillIndex]:
     from agent.skill_utils import parse_frontmatter
 
     try:
-        content = path.read_text(encoding="utf-8")
+        content = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return None
     try:
@@ -172,14 +172,14 @@ def _build_index(path: Path) -> Optional[_SkillIndex]:
 
 
 _cache_lock = threading.Lock()
-_index_cache: Dict[str, Tuple[Tuple[int, int], Optional[_SkillIndex]]] = {}
-_corpus_cache: Dict[Tuple, Tuple[Dict[str, _SkillIndex], Dict[str, int], int]] = {}
+_index_cache: dict[str, tuple[tuple[int, int], Optional[_SkillIndex]]] = {}
+_corpus_cache: dict[tuple, tuple[dict[str, _SkillIndex], dict[str, int], int]] = {}
 
 
-def _skill_files() -> List[Path]:
+def _skill_files() -> list[Path]:
     from agent.skill_utils import get_all_skills_dirs, iter_skill_index_files
 
-    files: List[Path] = []
+    files: list[Path] = []
     seen: set = set()
     for skills_dir in get_all_skills_dirs():
         if not skills_dir.is_dir():
@@ -192,7 +192,7 @@ def _skill_files() -> List[Path]:
     return files
 
 
-def _cached_index(path: Path, stamp: Tuple[int, int]) -> Optional[_SkillIndex]:
+def _cached_index(path: Path, stamp: tuple[int, int]) -> Optional[_SkillIndex]:
     key = str(path)
     with _cache_lock:
         hit = _index_cache.get(key)
@@ -204,9 +204,9 @@ def _cached_index(path: Path, stamp: Tuple[int, int]) -> Optional[_SkillIndex]:
     return index
 
 
-def _corpus() -> Tuple[Dict[str, _SkillIndex], Dict[str, int], int]:
+def _corpus() -> tuple[dict[str, _SkillIndex], dict[str, int], int]:
     """(name -> index, term -> document frequency, skill count); first name wins like skill_view."""
-    stamped: List[Tuple[Path, Tuple[int, int]]] = []
+    stamped: list[tuple[Path, tuple[int, int]]] = []
     for path in _skill_files():
         try:
             st = os.stat(path)
@@ -218,8 +218,8 @@ def _corpus() -> Tuple[Dict[str, _SkillIndex], Dict[str, int], int]:
         hit = _corpus_cache.get(signature)
     if hit is not None:
         return hit
-    by_name: Dict[str, _SkillIndex] = {}
-    df: Dict[str, int] = {}
+    by_name: dict[str, _SkillIndex] = {}
+    df: dict[str, int] = {}
     for path, stamp in stamped:
         index = _cached_index(path, stamp)
         if index is None or index.name in by_name:
@@ -255,7 +255,7 @@ def _tool_call_skill_name(tool_call: Any) -> Optional[str]:
     return str(name) if name else None
 
 
-def still_pruned_skill_names(messages: Sequence[Any]) -> List[str]:
+def still_pruned_skill_names(messages: Sequence[Any]) -> list[str]:
     """Skills whose newest event in *messages* is a prune marker (not a later ``skill_view``
     reload), newest marker first."""
     from agent.context_compressor import (
@@ -264,7 +264,7 @@ def still_pruned_skill_names(messages: Sequence[Any]) -> List[str]:
         _extract_pruned_skill_names,
     )
 
-    state: Dict[str, int] = {}
+    state: dict[str, int] = {}
     for position, message in enumerate(messages):
         if not isinstance(message, dict):
             continue
@@ -305,7 +305,7 @@ def human_words(message: Any) -> str:
 
 def background_terms(history: Sequence[Any]) -> frozenset:
     """Terms the human uses in many earlier turns of this conversation."""
-    seen: Dict[str, int] = {}
+    seen: dict[str, int] = {}
     turns = 0
     for message in history[-_BACKGROUND_WINDOW:]:
         if not isinstance(message, dict) or message.get("role") != "user":
@@ -323,12 +323,12 @@ def background_terms(history: Sequence[Any]) -> frozenset:
 @dataclass(frozen=True)
 class SkillRecall:
     name: str
-    matched: Tuple[str, ...]
+    matched: tuple[str, ...]
     excerpt: str
     score: float
 
 
-def _sentences(text: str) -> List[str]:
+def _sentences(text: str) -> list[str]:
     return [s.strip() for s in _SENTENCE_SPLIT_RE.split(re.sub(r"\s+", " ", text)) if s.strip()]
 
 
@@ -342,7 +342,7 @@ def _excerpt(step_text: str, matched_stems: Iterable[str]) -> str:
         hits = len(_terms(sentence) & stems)
         if hits:
             scored.append((hits / max(len(sentence), 1), idx, sentence))
-    chosen: List[Tuple[int, str]] = []
+    chosen: list[tuple[int, str]] = []
     used = 0
     for _density, idx, sentence in sorted(scored, key=lambda row: (-row[0], row[1])):
         cost = len(sentence) + (1 if chosen else 0)
@@ -362,7 +362,7 @@ def _saturate(tf: int, k: float = 1.2) -> float:
 
 
 def _step_hits(
-    step: _Step, query: set, df: Dict[str, int], total: int, skill_tf: Dict[str, int], background: frozenset,
+    step: _Step, query: set, df: dict[str, int], total: int, skill_tf: dict[str, int], background: frozenset,
     *, is_header: bool = False,
 ) -> set:
     counts = dict(step.counts)
@@ -398,7 +398,7 @@ def _step_hits(
 def match_pruned_skills(
     user_text: str, pruned_names: Sequence[str], *, limit: int = MAX_RECALLED_SKILLS,
     background: frozenset = frozenset(),
-) -> List[SkillRecall]:
+) -> list[SkillRecall]:
     """Pruned skills whose content the message touches, best first, at most *limit*. A skill
     matches through ONE step that is about the message (see ``_step_hits``); a single shared
     common word never fires."""
@@ -408,17 +408,17 @@ def match_pruned_skills(
     if not query:
         return []
     by_name, df, total = _corpus()
-    results: List[SkillRecall] = []
+    results: list[SkillRecall] = []
     for name in pruned_names:
         index = by_name.get(name) or by_name.get(name.split("/")[-1].split(":")[-1])
         if index is None or not (index.terms & query):
             continue
-        skill_tf: Dict[str, int] = {}
+        skill_tf: dict[str, int] = {}
         for step in index.steps:
             for term, n in step.counts:
                 if term in query:
                     skill_tf[term] = skill_tf.get(term, 0) + n
-        best: Optional[Tuple[float, _Step, frozenset]] = None
+        best: Optional[tuple[float, _Step, frozenset]] = None
         for position, step in enumerate(index.steps):
             hits = _step_hits(step, query, df, total, skill_tf, background, is_header=position == 0)
             if not hits:
@@ -436,10 +436,10 @@ def match_pruned_skills(
     return results[:limit]
 
 
-def _matched_words(user_text: str, stems: Iterable[str]) -> List[str]:
+def _matched_words(user_text: str, stems: Iterable[str]) -> list[str]:
     """Render matched stems as the words the user actually typed."""
     wanted = set(stems)
-    words: List[str] = []
+    words: list[str] = []
     for word in _WORD_RE.findall(user_text.lower()):
         stem = _stem(word)
         if stem in wanted and word not in words:

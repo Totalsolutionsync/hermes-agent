@@ -15,7 +15,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 from agent.redact import redact_for_egress
 
@@ -837,8 +837,8 @@ class MemoryManager:
             except Exception as e:
                 logger.debug("notify_memory_tool_write failed for op %s: %s", action, e)
 
-    def try_handle_memory_tool_first(self, args: Dict[str, Any],
-                                     metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    def try_handle_memory_tool_first(self, args: dict[str, Any],
+                                     metadata: Optional[dict[str, Any]] = None) -> Optional[str]:
         """Give an authoritative provider first refusal on the built-in ``memory`` tool.
 
         The normal path writes Hermes local memory, then mirrors to providers. A first-class
@@ -860,8 +860,8 @@ class MemoryManager:
                 return json.dumps(result, ensure_ascii=False)
         return None
 
-    def on_tool_observed(self, tool_name: str, args: Dict[str, Any], result: Any,
-                         metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def on_tool_observed(self, tool_name: str, args: dict[str, Any], result: Any,
+                         metadata: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
         """Notify external providers after an agent-loop tool completes; returns the dict
         annotations they produced for the caller to append to the tool result."""
         external = [p for p in self._providers if p.name != "builtin"]

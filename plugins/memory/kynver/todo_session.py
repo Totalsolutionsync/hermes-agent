@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 from .agentos_bridge import KynverAgentOSClient, KynverAgentOSError
 from .plan_binding import session_key_for_scope
@@ -38,13 +38,13 @@ class SessionEndpointMissing(Exception):
 
 @dataclass
 class SessionView:
-    items: List[Dict[str, str]]
-    plan: Optional[Dict[str, Any]] = None
-    errors: List[Dict[str, str]] = field(default_factory=list)
+    items: list[dict[str, str]]
+    plan: Optional[dict[str, Any]] = None
+    errors: list[dict[str, str]] = field(default_factory=list)
     omitted: int = 0
     adopted: bool = False
     # id -> epoch seconds the item went in progress (stale-work hints).
-    since: Dict[str, float] = field(default_factory=dict)
+    since: dict[str, float] = field(default_factory=dict)
 
 
 def describe_actor(by: Any) -> Optional[str]:
@@ -59,7 +59,7 @@ def describe_actor(by: Any) -> Optional[str]:
     return f"{name} ({label})"
 
 
-def _item(raw: Dict[str, Any]) -> Optional[Dict[str, str]]:
+def _item(raw: dict[str, Any]) -> Optional[dict[str, str]]:
     todo_id = str(raw.get("id") or "").strip()
     if not todo_id:
         return None
@@ -89,11 +89,11 @@ def parse_view(payload: Any) -> SessionView:
         if isinstance(e, dict)
     ]
     plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else None
-    since: Dict[str, float] = {}
+    since: dict[str, float] = {}
     for raw in payload.get("todos") or []:
         if isinstance(raw, dict) and raw.get("since") and raw.get("id"):
             try:
-                since[str(raw["id"])] = datetime.fromisoformat(str(raw["since"]).replace("Z", "+00:00")).timestamp()
+                since[str(raw["id"])] = datetime.fromisoformat(str(raw["since"])).timestamp()
             except ValueError:
                 pass
     return SessionView(
@@ -110,7 +110,7 @@ def session_call(
     client: KynverAgentOSClient,
     *,
     scope: str,
-    todos: Optional[List[Dict[str, Any]]] = None,
+    todos: Optional[list[dict[str, Any]]] = None,
     merge: bool = True,
     adopt: Optional[str] = None,
     label: Optional[str] = None,
@@ -120,7 +120,7 @@ def session_call(
     """Read (``todos is None``) or write the scope's list; raises SessionEndpointMissing on an
     older Kynver and KynverAgentOSError (with ``status``) on any other failure."""
     session_key = session_key_for_scope(scope)
-    body: Dict[str, Any] = {
+    body: dict[str, Any] = {
         "sessionKey": session_key,
         "actor": {"source": actor_source, "name": label or None, "ref": session_key},
     }

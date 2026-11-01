@@ -29,7 +29,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from hermes_constants import get_hermes_home, hermes_home_key
 
@@ -115,7 +115,7 @@ def short_text(text: str) -> str:
     return " ".join(redact(text or "").split())[:MAX_TEXT_CHARS]
 
 
-def memory_ids(items: Iterable[Dict[str, Any]]) -> List[str]:
+def memory_ids(items: Iterable[dict[str, Any]]) -> list[str]:
     return [str(item["id"]) for item in items if isinstance(item, dict) and item.get("id")]
 
 
@@ -177,12 +177,12 @@ class QualityFeedbackReporter:
         self._lock = threading.Lock()
         self._flush_lock = threading.Lock()
         # home key -> idempotencyKey -> payload; loaded lazily from the JSONL per profile.
-        self._buffers: Dict[str, "OrderedDict[str, Dict[str, Any]]"] = {}
+        self._buffers: dict[str, OrderedDict[str, dict[str, Any]]] = {}
         self._cooldown_until = 0.0
-        self._used_queries: "OrderedDict[str, None]" = OrderedDict()
-        self._threads: List[threading.Thread] = []
+        self._used_queries: OrderedDict[str, None] = OrderedDict()
+        self._threads: list[threading.Thread] = []
         self._warned_forbidden = False
-        self.stats: Dict[str, int] = {
+        self.stats: dict[str, int] = {
             "posted": 0,
             "buffered": 0,
             "rate_limited": 0,
@@ -202,7 +202,7 @@ class QualityFeedbackReporter:
         dedupe_text: str,
         query_text: str = "",
         note: str = "",
-        ids: Optional[List[str]] = None,
+        ids: Optional[list[str]] = None,
     ) -> None:
         if not load_feedback_settings().allows(outcome_kind):
             return
@@ -244,7 +244,7 @@ class QualityFeedbackReporter:
                 return
             alive[0].join(remaining)
 
-    def pending(self) -> List[Dict[str, Any]]:
+    def pending(self) -> list[dict[str, Any]]:
         with self._lock:
             return list(self._buffer_locked(hermes_home_key()).values())
 
@@ -267,7 +267,7 @@ class QualityFeedbackReporter:
                 self._used_queries.popitem(last=False)
         return True
 
-    def _deliver(self, payload: Dict[str, Any]) -> None:
+    def _deliver(self, payload: dict[str, Any]) -> None:
         try:
             if self._post(payload):
                 self._flush()
@@ -288,7 +288,7 @@ class QualityFeedbackReporter:
         finally:
             self._flush_lock.release()
 
-    def _post(self, payload: Dict[str, Any], *, buffered: bool = False) -> bool:
+    def _post(self, payload: dict[str, Any], *, buffered: bool = False) -> bool:
         """Post once. True when Kynver answered (accepted or permanently refused)."""
         key = payload["idempotencyKey"]
         if self._clock() < self._cooldown_until:
@@ -330,12 +330,12 @@ class QualityFeedbackReporter:
 
     # -- per-profile buffer -------------------------------------------------------------
 
-    def _buffer_locked(self, home: str) -> "OrderedDict[str, Dict[str, Any]]":
+    def _buffer_locked(self, home: str) -> OrderedDict[str, dict[str, Any]]:
         buffer = self._buffers.get(home)
         if buffer is None:
             buffer = OrderedDict()
             try:
-                lines = _buffer_path().read_text(encoding="utf-8").splitlines()
+                lines = _buffer_path().read_text(encoding="utf-8-sig").splitlines()
             except OSError:
                 lines = []
             for line in lines[-MAX_BUFFERED:]:
@@ -348,7 +348,7 @@ class QualityFeedbackReporter:
             self._buffers[home] = buffer
         return buffer
 
-    def _buffer(self, payload: Dict[str, Any]) -> None:
+    def _buffer(self, payload: dict[str, Any]) -> None:
         with self._lock:
             buffer = self._buffer_locked(hermes_home_key())
             buffer[payload["idempotencyKey"]] = payload
@@ -365,7 +365,7 @@ class QualityFeedbackReporter:
                 self._save_locked(buffer)
 
     @staticmethod
-    def _save_locked(buffer: "OrderedDict[str, Dict[str, Any]]") -> None:
+    def _save_locked(buffer: OrderedDict[str, dict[str, Any]]) -> None:
         path = _buffer_path()
         try:
             if not buffer:

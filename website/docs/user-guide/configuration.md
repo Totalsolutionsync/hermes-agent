@@ -2887,6 +2887,19 @@ browser:
   dialog_timeout_s: 300          # Safety auto-dismiss under must_respond (seconds)
 ```
 
+**Operator gates.** `browser.connection_freeze: true` is an emergency stop: `browser_exec`
+refuses every call before resolving a route or launching anything, so no browser (including
+a consent-gated external Chrome) receives a new connection until an operator sets it back to
+`false`. `browser.external_daemons` lists harness daemon names (`BU_NAME`s) that an operator
+runs outside Hermes, for example as a systemd user unit; `browser_exec` only attaches to those
+daemons and never spawns, reloads or stops them.
+
+```yaml
+browser:
+  connection_freeze: false       # true = refuse all browser_exec calls (operator emergency gate)
+  external_daemons: []           # e.g. ["relay-chrome"]; attach-only, never spawned or stopped by Hermes
+```
+
 **Executable resolution.** Hermes launches the first Chromium it finds:
 `browser.executable_path` → the Chromium installed by Hermes's package manager
 (`hermes pm install chromium`) → `/etc/hermes/chromium-executable-path` (official

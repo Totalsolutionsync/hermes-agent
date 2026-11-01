@@ -15,7 +15,7 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Mapping, Optional
 
 from agent.conversation_compression import recover_rotated_compression_session
 from agent.iteration_budget import IterationBudget
@@ -886,7 +886,7 @@ def _merge_gateway_notes(
 
 
 def _merge_pruned_skill_recall(
-    messages: List[Any], current_turn_user_idx: int, original_user_message: Any, plugin_user_context: str
+    messages: list[Any], current_turn_user_idx: int, original_user_message: Any, plugin_user_context: str
 ) -> str:
     """A skill compression pruned earlier in this session is re-surfaced for THIS turn only when
     the human's words touch its topic (deterministic keyword match, no LLM call). Rides the same

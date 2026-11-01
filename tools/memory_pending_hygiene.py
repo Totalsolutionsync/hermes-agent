@@ -124,7 +124,7 @@ def _state_path() -> Path:
 
 def _load_state() -> dict[str, Any]:
     try:
-        data = json.loads(_state_path().read_text(encoding="utf-8"))
+        data = json.loads(_state_path().read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}

@@ -395,8 +395,8 @@ def test_prefetch_full_view_filters_weak_hits_and_does_not_repeat_seen_memory():
 
 def test_prefetch_does_not_repeat_an_unchanged_index_handle(monkeypatch):
     from plugins.memory.kynver import KynverMemoryProvider
-    import plugins.memory.kynver as kynver
-    import plugins.memory.kynver.context as context
+    from plugins.memory import kynver
+    from plugins.memory.kynver import context
 
     monkeypatch.setattr(kynver, "load_context_settings", lambda: context.KynverContextSettings(
         prefetch_token_budget=128,
@@ -447,8 +447,8 @@ def test_todo_observer_mirrors_via_generic_hook_and_returns_metadata():
     annotation = provider.on_tool_observed("todo_list", {"merge": True}, result, {"tool_call_id": "call-1"})
 
     assert annotation == {"provider": "kynver", "todo_mirror": "synced", "count": 1, "state_updates": 1}
-    create_call = [call for call in client.calls if call[1] == "/tasks"][0]
-    close_call = [call for call in client.calls if call[1] == "/tasks/task-1/close"][0]
+    create_call = next(call for call in client.calls if call[1] == "/tasks")
+    close_call = next(call for call in client.calls if call[1] == "/tasks/task-1/close")
     assert create_call[2]["title"] == "Ship"
     assert create_call[2]["description"] == "Ship"
     assert create_call[2]["idempotencyKey"].startswith("hermes:forge:")
@@ -533,7 +533,7 @@ def test_memory_write_uses_provenance_and_threat_scan():
     )
 
     assert ok["success"] is True
-    memory_call = [call for call in client.calls if call[1] == "/memory"][0]
+    memory_call = next(call for call in client.calls if call[1] == "/memory")
     assert memory_call[0] == "POST"
     assert memory_call[2]["content"] == "User prefers concise answers."
     assert memory_call[2]["sourceId"] == "hermes:forge"
@@ -579,9 +579,9 @@ def test_task_lifecycle_contract_paths_and_payloads():
     json.loads(provider.handle_tool_call("kynver_task_log_event", {"taskId": "task-1", "eventType": "worker_update", "message": "halfway"}))
     json.loads(provider.handle_tool_call("kynver_task_steer", {"taskId": "task-1", "message": "prioritize tests"}))
 
-    close_call = [call for call in client.calls if call[1] == "/tasks/task-1/close"][0]
-    log_call = [call for call in client.calls if call[1] == "/tasks/task-1/events"][0]
-    steer_call = [call for call in client.calls if call[1] == "/tasks/task-1/steer"][0]
+    close_call = next(call for call in client.calls if call[1] == "/tasks/task-1/close")
+    log_call = next(call for call in client.calls if call[1] == "/tasks/task-1/events")
+    steer_call = next(call for call in client.calls if call[1] == "/tasks/task-1/steer")
     assert close_call[2]["status"] == "done"
     assert close_call[2]["summary"] == "done"
     assert log_call[2]["type"] == "worker_update"

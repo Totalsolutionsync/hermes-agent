@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Optional, Sequence
 
 from .contract import memory_search_path
 from .manual_steps import GuardFinding, subject_stems
@@ -56,7 +56,7 @@ class _Reader:
     def __init__(self, client: Any, *, timeout: float = FETCH_TIMEOUT):
         self.client = client
         self.timeout = timeout
-        self.cache: Dict[str, Optional[Note]] = {}
+        self.cache: dict[str, Optional[Note]] = {}
         self.fetches = 0
 
     def get(self, slug: str) -> Optional[Note]:
@@ -97,7 +97,7 @@ def _note_from(payload: Any, slug: str) -> Optional[Note]:
     return None
 
 
-def _points(text: str) -> List[str]:
+def _points(text: str) -> list[str]:
     out = [p.strip(" -*•\t") for p in _POINT_SPLIT.split(text or "")]
     out = [p for p in out if len(subject_stems(p)) >= 2]
     if len(out) <= 1:
@@ -106,12 +106,12 @@ def _points(text: str) -> List[str]:
     return out
 
 
-def _overlap(a: Set[str], b: Set[str]) -> float:
+def _overlap(a: set[str], b: set[str]) -> float:
     """How much of b the other side covers (b = a note point, so long briefs don't dilute it)."""
     return len(a & b) / max(1, len(b))
 
 
-def judge(line: str, old: Optional[Note], chain: Sequence[Note], record: Dict[str, Any]) -> Dict[str, Any]:
+def judge(line: str, old: Optional[Note], chain: Sequence[Note], record: dict[str, Any]) -> dict[str, Any]:
     """{"keep": bool, "why": str, "newest": slug} for one replaced match of one brief line."""
     old_slug = str(record.get("slug") or "")
     preview = str(record.get("preview") or "")
@@ -167,9 +167,9 @@ def judge(line: str, old: Optional[Note], chain: Sequence[Note], record: Dict[st
     }
 
 
-def _chain(reader: _Reader, first: str) -> List[Note]:
-    chain: List[Note] = []
-    seen: Set[str] = set()
+def _chain(reader: _Reader, first: str) -> list[Note]:
+    chain: list[Note] = []
+    seen: set[str] = set()
     slug = first
     while slug and slug not in seen and len(chain) < MAX_CHAIN:
         seen.add(slug)
@@ -181,7 +181,7 @@ def _chain(reader: _Reader, first: str) -> List[Note]:
     return chain
 
 
-def refine_replaced(findings: Sequence[GuardFinding], client: Any) -> List[GuardFinding]:
+def refine_replaced(findings: Sequence[GuardFinding], client: Any) -> list[GuardFinding]:
     """Clear REPLACED matches whose line agrees with the newest note. Mutates and returns findings."""
     reader = _Reader(client)
     for finding in findings:

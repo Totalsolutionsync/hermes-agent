@@ -6,11 +6,11 @@ Plugins register hooks here instead of patching :mod:`agent.system_prompt`.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, List
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-OperatingPromptHook = Callable[[Any], List[str]]
+OperatingPromptHook = Callable[[Any], list[str]]
 
 _HOOKS: list[OperatingPromptHook] = []
 
@@ -22,10 +22,10 @@ def register_operating_prompt_hook(hook: OperatingPromptHook) -> None:
         _HOOKS.append(hook)
 
 
-def collect_operating_prompt_blocks(agent: Any) -> List[str]:
+def collect_operating_prompt_blocks(agent: Any) -> list[str]:
     """Return all registered operating prompt blocks for this agent session."""
 
-    blocks: List[str] = []
+    blocks: list[str] = []
     for hook in _HOOKS:
         try:
             part = hook(agent)

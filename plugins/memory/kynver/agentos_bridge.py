@@ -93,10 +93,17 @@ def _active_env_path() -> Path:
 
 def _load_profile_env(path: Path | None = None) -> dict[str, str]:
     """Load active profile ``.env`` without mutating ``os.environ``."""
+    if path is None:
+        from agent.safe_worker_policy import _current_policy
+
+        # A bypass worker (safe mode / --ignore-user-config) reads no profile dotenv, as core's loader.
+        policy = _current_policy()
+        if policy is not None and policy.ignore_user_config:
+            return {}
     env_path = path or _active_env_path()
     out: dict[str, str] = {}
     try:
-        lines = env_path.read_text(encoding="utf-8").splitlines()
+        lines = env_path.read_text(encoding="utf-8-sig").splitlines()
     except FileNotFoundError:
         return out
     for raw in lines:

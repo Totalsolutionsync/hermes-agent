@@ -74,7 +74,7 @@ def test_replace_todo_write_supersedes_omitted_hermes_rows():
     )
 
     assert result["projected"] is True
-    rows_call = [c for c in client.post.call_args_list if c.args[0] == "/plans/plan-1/progress-rows"][0]
+    rows_call = next(c for c in client.post.call_args_list if c.args[0] == "/plans/plan-1/progress-rows")
     rows = rows_call.args[1]["rows"]
     by_key = {row["rowKey"]: row for row in rows}
     assert by_key["hermes-todo:s1:current"]["status"] == "todo"

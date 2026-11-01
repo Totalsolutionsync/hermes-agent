@@ -521,7 +521,7 @@ def _check_pending_memory_queue(should_fix: bool, f: Finding) -> None:
                         f"none older than {health['ttl_days']:g}d)")
     problems = []
     if health["count"] > health["cap"]:
-        problems.append(f"{health['count']} open (cap {health['cap']})")
+        problems.append(f"{health['count']} open (cap {health['cap']})")  # windows-footgun: ok (prose, not open())
     if health["expired"]:
         problems.append(f"{len(health['expired'])} older than {health['ttl_days']:g}d")
     check_warn("Pending memory queue not bounded: " + ", ".join(problems))

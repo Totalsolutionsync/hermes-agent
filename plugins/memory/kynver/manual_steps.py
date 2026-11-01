@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 from .blockers import FIX_NOTE_PREFIX, Statement, _clean, iter_files
 from .contract import MANUAL_STEP_CHECK_PATH
@@ -92,8 +92,8 @@ def _stem(token: str) -> str:
     return re.sub(r"(.)\1$", r"\1", out)
 
 
-def subject_stems(text: str) -> List[str]:
-    out: List[str] = []
+def subject_stems(text: str) -> list[str]:
+    out: list[str] = []
     for raw in re.split(r"[^A-Za-z0-9]+", text.lower()):
         if len(raw) < 2 or raw.isdigit() or raw in _STOP:
             continue
@@ -103,9 +103,9 @@ def subject_stems(text: str) -> List[str]:
     return out
 
 
-def find_guard_statements(path: str, text: str) -> List[Statement]:
+def find_guard_statements(path: str, text: str) -> list[Statement]:
     """Manual-step and standing-advice sentences in one file (code fences, quotes and our notes skipped)."""
-    found: List[Statement] = []
+    found: list[Statement] = []
     seen: set[str] = set()
     in_fence = False
     for line_no, raw in enumerate(text.splitlines(), start=1):
@@ -135,12 +135,12 @@ class GuardFinding:
     statement: Statement
     manual_step: bool
     automated: bool
-    automation: List[dict] = field(default_factory=list)
-    replaced: List[dict] = field(default_factory=list)
-    retired_manual_steps: List[dict] = field(default_factory=list)
+    automation: list[dict] = field(default_factory=list)
+    replaced: list[dict] = field(default_factory=list)
+    retired_manual_steps: list[dict] = field(default_factory=list)
     advice: str = ""
     # Replaced matches cleared by replaced_check (the line agrees with the newest note), with why.
-    cleared: List[dict] = field(default_factory=list)
+    cleared: list[dict] = field(default_factory=list)
 
     @property
     def stale(self) -> bool:
@@ -152,9 +152,9 @@ class RouteMissing(RuntimeError):
     """Kynver is reachable but predates the manual-step route."""
 
 
-def check_guard_statements(client: Any, statements: Sequence[Statement], *, timeout: float | None = None) -> List[GuardFinding]:
+def check_guard_statements(client: Any, statements: Sequence[Statement], *, timeout: float | None = None) -> list[GuardFinding]:
     """Ask Kynver about every statement (batched). Raises RouteMissing on an old server, else on failure."""
-    findings: List[GuardFinding] = []
+    findings: list[GuardFinding] = []
     for start in range(0, len(statements), BATCH_SIZE):
         batch = statements[start:start + BATCH_SIZE]
         try:
@@ -206,11 +206,11 @@ def describe_guard(finding: GuardFinding) -> str:
 class SkillConflict:
     manual: Statement
     automated: Statement
-    shared: List[str]
+    shared: list[str]
 
 
-def _automation_statements(path: str, text: str) -> List[Statement]:
-    out: List[Statement] = []
+def _automation_statements(path: str, text: str) -> list[Statement]:
+    out: list[Statement] = []
     in_fence = False
     for line_no, raw in enumerate(text.splitlines(), start=1):
         stripped = raw.strip()
@@ -225,18 +225,18 @@ def _automation_statements(path: str, text: str) -> List[Statement]:
     return out
 
 
-def skill_internal_conflicts(files: Iterable[Path]) -> List[SkillConflict]:
+def skill_internal_conflicts(files: Iterable[Path]) -> list[SkillConflict]:
     """Pairs where one line tells Will to do X by hand and another (any file) says X is automated."""
-    manual: List[Statement] = []
-    automated: List[Statement] = []
+    manual: list[Statement] = []
+    automated: list[Statement] = []
     for f in files:
         try:
-            text = f.read_text(encoding="utf-8", errors="replace")
+            text = f.read_text(encoding="utf-8-sig", errors="replace")
         except OSError:
             continue
         manual.extend(s for s in find_guard_statements(str(f), text) if is_manual_step_text(s.text))
         automated.extend(_automation_statements(str(f), text))
-    conflicts: List[SkillConflict] = []
+    conflicts: list[SkillConflict] = []
     for m in manual:
         m_stems = set(subject_stems(m.text))
         best: Optional[SkillConflict] = None
@@ -251,10 +251,10 @@ def skill_internal_conflicts(files: Iterable[Path]) -> List[SkillConflict]:
     return conflicts
 
 
-def lint_skill(directory: str, client: Any = None, *, timeout: float | None = None) -> Dict[str, Any]:
+def lint_skill(directory: str, client: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
     """Report-only lint of one skill directory. ``client=None`` skips the memory comparison."""
     files = iter_files([directory])
-    report: Dict[str, Any] = {
+    report: dict[str, Any] = {
         "skill": directory,
         "files": [str(f) for f in files],
         "internal": skill_internal_conflicts(files),
@@ -264,10 +264,10 @@ def lint_skill(directory: str, client: Any = None, *, timeout: float | None = No
     }
     if client is None:
         return report
-    statements: List[Statement] = []
+    statements: list[Statement] = []
     for f in files:
         try:
-            statements.extend(find_guard_statements(str(f), f.read_text(encoding="utf-8", errors="replace")))
+            statements.extend(find_guard_statements(str(f), f.read_text(encoding="utf-8-sig", errors="replace")))
         except OSError:
             continue
     try:

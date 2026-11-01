@@ -853,6 +853,20 @@ gateway:
 
 `port`, `key`, `host`, `cors_origins`, and `model_name` are automatically bridged into the platform's `extra` settings, so they behave exactly like their `API_SERVER_*` environment-variable counterparts. Environment variables take precedence over `config.yaml` values. The block is also accepted under `gateway.platforms.api_server:` or a top-level `platforms.api_server:` section.
 
+### Continuing a Telegram DM session
+
+By default an API turn cannot continue a stored session that belongs to the Telegram adapter.
+Set `gateway.api_server.allow_telegram_session_continue: true` (default `false`) to let an API
+turn continue a Telegram **direct-message** session whose user the gateway authorizes (the
+owner or an allowlisted user). The API key is treated as the owner's credential; group chats
+and sessions of unauthorized or unknown Telegram users stay refused.
+
+```yaml
+gateway:
+  api_server:
+    allow_telegram_session_continue: true
+```
+
 ### Concurrent-run cap
 
 The API server limits how many agent runs may execute at once across the endpoints that start one directly: the OpenAI-compatible endpoints, the Runs endpoints, and the session-chat endpoints (`POST /api/sessions/{id}/chat` and its `/stream` variant, which carry cross-machine agent DMs). Cron-triggered runs (`POST /api/jobs/{id}/run`, `POST /api/cron/fire`) go through the cron scheduler and are governed by cron's own limits, not this cap. The cap is read from `gateway.api_server.max_concurrent_runs` (default **10**; `0` disables the limit, negative values clamp to 0). When the cap is reached, new run-starting requests are rejected with **HTTP 429** `Too many concurrent runs (max N)` — clients should back off and retry.

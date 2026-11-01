@@ -30,7 +30,7 @@ def _path():
 def _load() -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     try:
-        for line in _path().read_text(encoding="utf-8").splitlines():
+        for line in _path().read_text(encoding="utf-8-sig").splitlines():
             if not line.strip():
                 continue
             try:

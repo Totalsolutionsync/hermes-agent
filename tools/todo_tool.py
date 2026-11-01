@@ -8,7 +8,7 @@ system-prompt mutation."""
 import json
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
 # The list is re-read after every compression (format_for_injection), so unbounded
@@ -44,34 +44,34 @@ class BaseTodoStore(ABC):
     missing method into a TypeError at construction instead of an AttributeError mid-turn."""
 
     @abstractmethod
-    def read(self) -> List[Dict[str, str]]: ...
+    def read(self) -> list[dict[str, str]]: ...
 
     @abstractmethod
-    def write(self, todos: List[Dict[str, Any]], merge: bool = False) -> List[Dict[str, str]]: ...
+    def write(self, todos: list[dict[str, Any]], merge: bool = False) -> list[dict[str, str]]: ...
 
     @abstractmethod
     def has_items(self) -> bool: ...
 
     @abstractmethod
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         """``{"todos": [...], "revision": int}``; revision is monotonic across writes."""
 
     @abstractmethod
-    def restore(self, todos: List[Dict[str, Any]], *, revision: Any = 0) -> List[Dict[str, str]]:
+    def restore(self, todos: list[dict[str, Any]], *, revision: Any = 0) -> list[dict[str, str]]:
         """Adopt a trusted snapshot without manufacturing a new revision."""
 
     @abstractmethod
     def format_for_injection(self) -> Optional[str]: ...
 
-    def adopt(self, ref: str) -> List[Dict[str, str]]:
+    def adopt(self, ref: str) -> list[dict[str, str]]:
         """Make a shared plan handed over by id/title/link this session's list (Kynver store)."""
         raise NotImplementedError("Picking up a shared plan needs the Kynver todo store")
 
-    def sync_info(self) -> Dict[str, Any]:
+    def sync_info(self) -> dict[str, Any]:
         """Where the last list came from (shared plan, or a local fallback and why)."""
         return {}
 
-    def in_progress_since(self) -> Dict[str, float]:
+    def in_progress_since(self) -> dict[str, float]:
         """``{id: epoch seconds}`` each in_progress item went in progress, when known."""
         return {}
 
@@ -83,7 +83,7 @@ class TodoStore(BaseTodoStore):
     def __init__(self):
         self._items: list[dict[str, str]] = []
         self._revision = 0
-        self._since: Dict[str, float] = {}
+        self._since: dict[str, float] = {}
 
     def _track_since(self) -> None:
         """Remember when each item went in_progress (stale-work hints)."""
@@ -91,7 +91,7 @@ class TodoStore(BaseTodoStore):
         active = {i["id"] for i in self._items if i["status"] == "in_progress"}
         self._since = {i: self._since.get(i, now) for i in active}
 
-    def in_progress_since(self) -> Dict[str, float]:
+    def in_progress_since(self) -> dict[str, float]:
         return dict(self._since)
 
     def _fresh_items(self, todos: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -268,7 +268,7 @@ class TodoStore(BaseTodoStore):
         return normalized
 
 
-def format_checklist(items: List[Dict[str, str]]) -> str:
+def format_checklist(items: list[dict[str, str]]) -> str:
     """``✓ done`` / ``✗ dropped`` / ``▶ doing`` / ``○ to do`` lines, subtasks indented; an item
     someone else changed (another chat, a cron, Kynver) ends with ``— by <who>``."""
     by_id = {item.get("id"): item for item in items}
@@ -292,7 +292,7 @@ def format_checklist(items: List[Dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def stale_in_progress_hint(items: List[Dict[str, str]], since: Dict[str, float],
+def stale_in_progress_hint(items: list[dict[str, str]], since: dict[str, float],
                            now: Optional[float] = None) -> Optional[str]:
     """Nudge for in_progress items untouched for STALE_IN_PROGRESS_SECONDS, else None."""
     now = time.time() if now is None else now
@@ -307,17 +307,17 @@ def stale_in_progress_hint(items: List[Dict[str, str]], since: Dict[str, float],
             "or note what it is waiting on.")
 
 
-def _todo_payload(items: List[Dict[str, str]], revision: Any, *, sync: Optional[Dict[str, Any]] = None,
+def _todo_payload(items: list[dict[str, str]], revision: Any, *, sync: Optional[dict[str, Any]] = None,
                   hint: Optional[str] = None) -> str:
-    summary: Dict[str, int] = {"total": len(items)}
+    summary: dict[str, int] = {"total": len(items)}
     for status in ("pending", "in_progress", "completed", "cancelled"):
         summary[status] = sum(1 for i in items if i["status"] == status)
     superseded = sum(1 for i in items if i.get("superseded") and i["status"] in _ACTIVE_STATUSES)
     if superseded:
         summary["superseded"] = superseded
 
-    def dump(shown: List[Dict[str, str]]) -> str:
-        body: Dict[str, Any] = {"todos": shown, "revision": revision, "summary": summary,
+    def dump(shown: list[dict[str, str]]) -> str:
+        body: dict[str, Any] = {"todos": shown, "revision": revision, "summary": summary,
                                 "checklist": format_checklist(shown)}
         if len(shown) < len(items):
             body["omitted_finished"] = len(items) - len(shown)
@@ -346,7 +346,7 @@ def _todo_payload(items: List[Dict[str, str]], revision: Any, *, sync: Optional[
         limit //= 2
 
 
-def todo_tool(todos: Optional[List[Dict[str, Any]]] = None, merge: bool = False,
+def todo_tool(todos: Optional[list[dict[str, Any]]] = None, merge: bool = False,
               store: Optional[BaseTodoStore] = None, plan: Optional[str] = None) -> str:
     """Write ``todos`` (replace, or ``merge`` by id) or read when None -> list + summary JSON.
     ``plan`` first adopts a shared plan handed over (Kynver store)."""
@@ -383,8 +383,8 @@ TODO_SCHEMA = {
     "name": "todo_list",
     "description": (
         # See #95681. Kept short: this schema rides on every call.
-        "Your working memory for everything you are tracking in this chat: multi-step work "
-        "(3+ steps; one item per instance for 'all N' tasks), background workers (one item "
+        "Your working memory for everything you are tracking in this chat. It holds multi-step "
+        "work (3+ steps; one item per instance for 'all N' tasks), background workers (one item "
         "each, in_progress while it runs; any number can be in progress) and things waiting "
         "on the user ('Needs <user>: …'). Read it (no args) when resuming work. Update it in "
         "the same turn something starts, finishes or fails. Order is priority; nest subtasks "

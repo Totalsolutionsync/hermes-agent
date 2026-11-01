@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 EXIT_CLEAN = 0
 EXIT_STALE = 1
@@ -33,7 +33,7 @@ def _client() -> Any:
     return KynverAgentOSClient()
 
 
-def _findings_json(findings: List[Any]) -> str:
+def _findings_json(findings: list[Any]) -> str:
     return json.dumps(
         [
             {
@@ -52,7 +52,7 @@ def _findings_json(findings: List[Any]) -> str:
     )
 
 
-def _check(paths: List[str], client: Any) -> Optional[List[Any]]:
+def _check(paths: list[str], client: Any) -> Optional[list[Any]]:
     from plugins.memory.kynver.blockers import check_statements, collect_statements
 
     statements = collect_statements(paths)
@@ -96,7 +96,7 @@ def cmd_scan(args: Any, client: Any = None) -> int:
     return EXIT_CLEAN
 
 
-def _guard(paths: List[str], client: Any) -> Optional[List[Any]]:
+def _guard(paths: list[str], client: Any) -> Optional[list[Any]]:
     """Manual-step / replaced-note lines checked against Kynver. [] when the server predates the route."""
     from plugins.memory.kynver.manual_steps import RouteMissing, check_guard_statements, find_guard_statements
     from plugins.memory.kynver.blockers import iter_files
@@ -104,7 +104,7 @@ def _guard(paths: List[str], client: Any) -> Optional[List[Any]]:
     statements = []
     for f in iter_files(paths):
         try:
-            statements.extend(find_guard_statements(str(f), f.read_text(encoding="utf-8", errors="replace")))
+            statements.extend(find_guard_statements(str(f), f.read_text(encoding="utf-8-sig", errors="replace")))
         except OSError:
             continue
     if not statements:
@@ -123,7 +123,7 @@ def _guard(paths: List[str], client: Any) -> Optional[List[Any]]:
     return refine_replaced(findings, client)
 
 
-def _guard_json(findings: List[Any]) -> List[dict]:
+def _guard_json(findings: list[Any]) -> list[dict]:
     return [
         {
             "path": g.statement.path,

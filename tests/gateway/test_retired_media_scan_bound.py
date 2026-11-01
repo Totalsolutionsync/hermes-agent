@@ -47,8 +47,9 @@ def test_candidates_share_one_messages_pass(owner, tmp_path, monkeypatch):
         [(PREFIX + str(index), json.dumps(reference)) for index, reference in enumerate(references)]))
     scans = _trace_messages_scans(db)
     collect_retired_media(db)
-    full = [sql for sql in scans if 'id>' not in sql.replace(' ', '')]
-    assert len(full) == 1, f'{len(references)} candidates must share one messages scan, saw {len(full)}'
+    # Every pass is id-sliced (#51); with one slice of history and no rows after the watermark,
+    # each recorded statement belongs to the shared pass.
+    assert len(scans) == 1, f'{len(references)} candidates must share one messages scan, saw {len(scans)}'
     assert [Path(reference['path']).exists() for reference in references] == [True] * 3 + [False] * 3
     left = db._read_all('SELECT key FROM state_meta WHERE key>=? AND key<?', (PREFIX, PREFIX[:-1] + '/'))
     assert sorted(row['key'] for row in left) == [PREFIX + str(index) for index in range(3)]

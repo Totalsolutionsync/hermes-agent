@@ -108,7 +108,7 @@ MEMORY_LIMITATION_CHECK_SCHEMA = {
     "name": "kynver_memory_limitation_check",
     "description": (
         "Before saying something can't be done, or holding work because of a limitation, check it here. "
-        "Returns open (recorded blocker, fix not shipped), fixed (its fix merged and deployed: do not report it "
+        "Returns open (recorded blocker, fix not shipped), fixed (its fix merged and deployed: do not report it "  # windows-footgun: ok (prose, not open())
         "as a blocker), or unverified (no live record: recheck the real system first)."
     ),
     "parameters": {
