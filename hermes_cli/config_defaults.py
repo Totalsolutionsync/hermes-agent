@@ -2236,6 +2236,10 @@ DEFAULT_CONFIG = {
             # /v1/runs beyond this get HTTP 429 + Retry-After, bounding CPU/memory/LLM-quota
             # exhaustion from a request flood. 0 = no cap.
             "max_concurrent_runs": 10,
+            # Let an authenticated API turn continue a stored Telegram DM session whose user the
+            # gateway authorizes (the owner), so a client can pick up the owner's Telegram chat.
+            # Off by default: every Telegram-sourced session is otherwise refused (permission_denied).
+            "allow_telegram_session_continue": False,
             # Cap (chars) on each tool output and tool-call argument string in the stored
             # /v1/responses conversation history used for previous_response_id chaining. The
             # stored history is cumulative, so a few large tool outputs can make one
