@@ -78,6 +78,32 @@ MEMORY_CHECK_MANUAL_STEP_SCHEMA = {
     },
 }
 
+MEMORY_CHECK_QUESTION_SCHEMA = {
+    "name": "kynver_memory_check_question",
+    "description": (
+        "Before asking the user for a fact, link, number or decision, call kynver_memory_check_question. "
+        "Pass one question in text or up to 25 questions in items. If alreadyAnswered is true, use the "
+        "remembered answer and do not ask again unless it may have changed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "text": {"type": "string", "description": "One question you are about to ask."},
+            "items": {
+                "type": "array",
+                "maxItems": 25,
+                "items": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+                "description": "Question list from a brief or report (max 25).",
+            },
+        },
+        "anyOf": [{"required": ["text"]}, {"required": ["items"]}],
+    },
+}
+
 MEMORY_LIMITATION_CHECK_SCHEMA = {
     "name": "kynver_memory_limitation_check",
     "description": (
@@ -270,6 +296,7 @@ ALL_TOOL_SCHEMAS = [
     MEMORY_WRITE_SCHEMA,
     MEMORY_LIMITATION_CHECK_SCHEMA,
     MEMORY_CHECK_MANUAL_STEP_SCHEMA,
+    MEMORY_CHECK_QUESTION_SCHEMA,
     MEMORY_DECISION_CHECK_SCHEMA,
     TASK_CREATE_SCHEMA,
     TASK_UPDATE_SCHEMA,

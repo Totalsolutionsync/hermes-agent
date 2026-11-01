@@ -22,6 +22,10 @@ QUALITY_FEEDBACK_PATH = f"{MEMORY_PATH}/quality-feedback"
 LIMITATION_CHECK_PATH = f"{MEMORY_PATH}/limitations/check"
 # memory_check_manual_step: is this by-hand step automated, or does this line repeat a replaced note?
 MANUAL_STEP_CHECK_PATH = f"{MEMORY_PATH}/manual-step/check"
+# Completed-turn capture of deterministic user-supplied answers.
+USER_ANSWER_CAPTURE_PATH = f"{MEMORY_PATH}/user-answers"
+# Check-before-asking for a fact, link, number or decision.
+QUESTION_CHECK_PATH = f"{MEMORY_PATH}/question/check"
 # Check-before-acting: newest decisions about an entity (GET ?entity=).
 DECISION_CHECK_PATH = f"{MEMORY_PATH}/decisions/check"
 
