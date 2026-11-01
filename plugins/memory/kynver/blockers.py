@@ -18,7 +18,7 @@ import datetime as _dt
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Sequence
+from typing import Any, Iterable, Optional, Sequence
 
 from .contract import LIMITATION_CHECK_PATH
 
@@ -56,8 +56,8 @@ class Finding:
     status: str
     fixed_by: Optional[str] = None
     fixed_at: Optional[str] = None
-    matches: List[dict] = field(default_factory=list)
-    evidence: List[str] = field(default_factory=list)
+    matches: list[dict] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
     # Kynver's own reading of the line; False for "Facebook is no longer held".
     is_limitation: Optional[bool] = None
 
@@ -75,9 +75,9 @@ def _clean(text: str) -> str:
     return " ".join(out.split())
 
 
-def find_statements(path: str, text: str) -> List[Statement]:
+def find_statements(path: str, text: str) -> list[Statement]:
     """Candidate limitation sentences in one file (code fences and our own fix notes skipped)."""
-    found: List[Statement] = []
+    found: list[Statement] = []
     seen: set[str] = set()
     in_fence = False
     for line_no, raw in enumerate(text.splitlines(), start=1):
@@ -99,9 +99,9 @@ def find_statements(path: str, text: str) -> List[Statement]:
     return found
 
 
-def iter_files(paths: Iterable[str]) -> List[Path]:
+def iter_files(paths: Iterable[str]) -> list[Path]:
     """Expand files and directories (recursively) into scannable text files."""
-    out: List[Path] = []
+    out: list[Path] = []
     for raw in paths:
         p = Path(raw).expanduser()
         if p.is_dir():
@@ -116,11 +116,11 @@ def iter_files(paths: Iterable[str]) -> List[Path]:
     return [f for f in out if f.stat().st_size <= MAX_FILE_BYTES]
 
 
-def collect_statements(paths: Iterable[str]) -> List[Statement]:
-    statements: List[Statement] = []
+def collect_statements(paths: Iterable[str]) -> list[Statement]:
+    statements: list[Statement] = []
     for f in iter_files(paths):
         try:
-            text = f.read_text(encoding="utf-8", errors="replace")
+            text = f.read_text(encoding="utf-8-sig", errors="replace")
         except OSError:
             continue
         statements.extend(find_statements(str(f), text))
@@ -140,9 +140,9 @@ def _finding(statement: Statement, result: Any) -> Finding:
     )
 
 
-def check_statements(client: Any, statements: Sequence[Statement], *, timeout: float | None = None) -> List[Finding]:
+def check_statements(client: Any, statements: Sequence[Statement], *, timeout: float | None = None) -> list[Finding]:
     """Ask Kynver about every statement (batched). Raises when Kynver can't be reached."""
-    findings: List[Finding] = []
+    findings: list[Finding] = []
     for start in range(0, len(statements), BATCH_SIZE):
         batch = statements[start:start + BATCH_SIZE]
         payload = client.post(
@@ -181,7 +181,7 @@ def is_under(path: str, roots: Sequence[Path]) -> bool:
     return any(resolved == r or r in resolved.parents for r in roots)
 
 
-def default_skill_roots() -> List[Path]:
+def default_skill_roots() -> list[Path]:
     from hermes_constants import get_hermes_home  # lazy: keeps this module importable in tests
 
     return [(get_hermes_home() / "skills").resolve()]
@@ -202,7 +202,7 @@ def annotate_skill_file(path: str, findings: Sequence[Finding], *, today: Option
     if not stale:
         return 0
     p = Path(path)
-    lines = p.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines = p.read_text(encoding="utf-8-sig").splitlines(keepends=True)
     added = 0
     for line_no, finding in reversed(stale):
         idx = line_no - 1

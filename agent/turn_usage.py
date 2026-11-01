@@ -248,6 +248,13 @@ def record_response_usage(
         if _moa_cost is not None:
             agent.session_estimated_cost_usd += _moa_cost
             _cost_delta = (_cost_delta or 0.0) + _moa_cost
+    if _cost_delta is None:
+        from agent.provider_spend_cap import price_usd
+        _cost_delta = price_usd(_agg_cost_provider, aggregator_usage)
+        if _cost_delta is not None:
+            agent.session_estimated_cost_usd += _cost_delta
+    from agent.provider_spend_cap import record as _record_provider_spend
+    _record_provider_spend(_agg_cost_provider, _cost_delta)
     agent.session_cost_status = cost_result.status
     agent.session_cost_source = cost_result.source
 

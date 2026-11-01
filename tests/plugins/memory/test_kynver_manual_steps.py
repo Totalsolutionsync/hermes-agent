@@ -122,7 +122,7 @@ def test_check_brief_flags_a_by_hand_step_memory_says_is_automated(fake, tmp_pat
     out = capsys.readouterr().out
     assert "1 outdated line(s)" in out
     assert "AUTOMATED" in out and "brief.md:3" in out and OCT17["slug"] in out
-    path, body = next((p, b) for p, b in fake.requests if p.endswith("/manual-step/check"))
+    body = next(b for p, b in fake.requests if p.endswith("/manual-step/check"))
     assert [i["text"] for i in body["items"]] == [REPORT_LINE]
 
     clean = tmp_path / "clean.md"

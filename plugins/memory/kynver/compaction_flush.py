@@ -506,7 +506,7 @@ class CompactionFactFlusher:
         if spool is None:
             spool = OrderedDict()
             try:
-                lines = _spool_path().read_text(encoding="utf-8").splitlines()
+                lines = _spool_path().read_text(encoding="utf-8-sig").splitlines()
             except OSError:
                 lines = []
             for line in lines[-MAX_SPOOLED:]:

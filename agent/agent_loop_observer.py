@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +22,13 @@ _OBSERVED_AGENT_LOOP_TOOLS = frozenset(
 def notify_agent_loop_tool(
     agent: Any,
     tool_name: str,
-    args: Dict[str, Any],
+    args: dict[str, Any],
     result: Any,
     *,
     task_id: str = "",
     tool_call_id: str = "",
     duration_ms: int = 0,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Notify generic observers that an agent-loop tool completed."""
     if tool_name not in _OBSERVED_AGENT_LOOP_TOOLS:
         return []
@@ -59,7 +59,7 @@ def notify_agent_loop_tool(
     # The provenance builder stamps tool_name="memory"; keep the observed tool's own name.
     metadata["tool_name"] = tool_name
 
-    annotations: List[Dict[str, Any]] = []
+    annotations: list[dict[str, Any]] = []
     memory_manager = getattr(agent, "_memory_manager", None)
     if memory_manager:
         try:
@@ -92,7 +92,7 @@ def notify_agent_loop_tool(
     return annotations
 
 
-def append_observer_metadata(result: Any, annotations: List[Dict[str, Any]]) -> Any:
+def append_observer_metadata(result: Any, annotations: list[dict[str, Any]]) -> Any:
     """Attach observer metadata to JSON object tool results when possible."""
     if not annotations:
         return result

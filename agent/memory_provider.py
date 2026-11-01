@@ -14,7 +14,7 @@ import re
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -220,8 +220,8 @@ class MemoryProvider(ABC):
         callers may omit this field: ``old_text`` alone is not authoritative identity.
         """
 
-    def on_tool_observed(self, tool_name: str, args: Dict[str, Any], result: Any,
-                         metadata: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    def on_tool_observed(self, tool_name: str, args: dict[str, Any], result: Any,
+                         metadata: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
         """Observe a completed agent-loop tool (``todo_list``, ``memory``, ``delegate_task``,
         ``session_search``). These bypass registry dispatch, so ``post_tool_call`` plugins never
         see their live agent state. Return a small JSON-serializable dict to annotate the tool

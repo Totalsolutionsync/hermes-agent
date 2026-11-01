@@ -70,8 +70,166 @@ def test_provider_exposes_memory_task_and_skill_tools():
     names = {schema["name"] for schema in provider.get_tool_schemas()}
 
     assert "kynver_memory_search" in names
+    assert "kynver_memory_check_question" in names
     assert "kynver_task_create" in names
     assert "kynver_skill_list" in names
+
+
+def test_sync_turn_captures_the_previous_assistant_question_in_background():
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.session_sync_disabled = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="telegram")
+    provider.sync_turn(
+        "https://maps.app.goo.gl/6MKWm9jYzLkHp3xk8 I already gave you the link",
+        "Thanks, I have it now.",
+        session_id="session-1",
+        messages=[
+            {"role": "assistant", "content": "What is the Google Maps link to the listing?"},
+            {"role": "user", "content": "https://maps.app.goo.gl/6MKWm9jYzLkHp3xk8 I already gave you the link"},
+            {"role": "assistant", "content": "Thanks, I have it now."},
+        ],
+    )
+    provider._wait_user_answer_captures(1.0)
+
+    assert len(client.calls) == 1
+    method, path, body, slug, timeout = client.calls[0]
+    assert (method, path, slug, timeout) == ("POST", "/memory/user-answers", None, 3.0)
+    assert body == {
+        "assistantMessage": "What is the Google Maps link to the listing?",
+        "userMessage": "https://maps.app.goo.gl/6MKWm9jYzLkHp3xk8 I already gave you the link",
+        "sessionId": "session-1",
+        "platform": "telegram",
+        "author": {"type": "user", "name": ""},
+        "askedAt": body["askedAt"],
+    }
+    assert body["askedAt"].endswith("Z")
+
+
+def test_sync_turn_user_answer_capture_fails_open_when_endpoint_is_down():
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    class CaptureDownClient(FakeClient):
+        def post(self, path, body, *, slug=None, timeout=None):
+            if path == "/memory/user-answers":
+                raise RuntimeError("endpoint down")
+            return super().post(path, body, slug=slug, timeout=timeout)
+
+    client = CaptureDownClient()
+    client.config.session_sync_disabled = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="telegram")
+
+    # No exception escapes sync_turn; there is no model/LLM call anywhere in this path.
+    provider.sync_turn(
+        "yes",
+        "Understood.",
+        messages=[
+            {"role": "assistant", "content": "Is Alisin Burns their lead lawyer?"},
+            {"role": "user", "content": "yes"},
+            {"role": "assistant", "content": "Understood."},
+        ],
+    )
+    provider._wait_user_answer_captures(1.0)
+    assert "memory.user_answers.capture" in provider._last_error
+
+
+def test_sync_turn_posts_nothing_when_the_assistant_did_not_ask():
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.session_sync_disabled = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="telegram")
+    provider.sync_turn(
+        "https://maps.app.goo.gl/6MKWm9jYzLkHp3xk8",
+        "Saved.",
+        messages=[
+            {"role": "assistant", "content": "Done. The build is green and the PR is up."},
+            {"role": "user", "content": "https://maps.app.goo.gl/6MKWm9jYzLkHp3xk8"},
+        ],
+    )
+    provider._wait_user_answer_captures(0.1)
+    assert client.calls == []
+
+
+def test_sync_turn_posts_for_a_numbered_ask_without_question_mark():
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.session_sync_disabled = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="telegram")
+    ask = "Here is where it stands.\n5. I need 3 facts from you: the asking price and the Google Maps link to the listing"
+    provider.sync_turn(
+        "https://maps.app.goo.gl/6MKWm9jYzLkHp3xk8 I already gave you the link",
+        "Thanks.",
+        messages=[
+            {"role": "assistant", "content": ask},
+            {"role": "user", "content": "https://maps.app.goo.gl/6MKWm9jYzLkHp3xk8 I already gave you the link"},
+        ],
+    )
+    provider._wait_user_answer_captures(1.0)
+    assert [call[1] for call in client.calls] == ["/memory/user-answers"]
+    assert client.calls[0][2]["assistantMessage"] == ask
+
+
+def test_sync_turn_does_not_capture_bot_authors():
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.config.session_sync_disabled = True
+    provider = KynverMemoryProvider(client=client)
+    provider.initialize("session-1", platform="telegram")
+    provider.sync_turn(
+        "https://example.com/listing",
+        "Recorded.",
+        messages=[
+            {"role": "assistant", "content": "What is the listing link?"},
+            {"role": "user", "content": "https://example.com/listing"},
+        ],
+        turn_author={"id": "42", "name": "relay-bot", "is_bot": True},
+    )
+    provider.sync_turn(
+        "https://example.com/listing",
+        "Recorded.",
+        messages=[
+            {"role": "assistant", "content": "What is the listing link?"},
+            {"role": "user", "content": "https://example.com/listing"},
+        ],
+        turn_author={"type": "cron", "name": "nightly"},
+    )
+    provider._wait_user_answer_captures(0.1)
+    assert client.calls == []
+
+
+def test_memory_check_question_tool_posts_single_question_and_batch():
+    from plugins.memory.kynver import KynverMemoryProvider
+
+    client = FakeClient()
+    client.responses[("POST", "/memory/question/check")] = {
+        "alreadyAnswered": True,
+        "answers": [{"answer": "https://maps.app.goo.gl/example"}],
+    }
+    provider = KynverMemoryProvider(client=client)
+
+    single = json.loads(provider.handle_tool_call(
+        "kynver_memory_check_question",
+        {"text": "What is the Google Maps link?"},
+    ))
+    batch = json.loads(provider.handle_tool_call(
+        "kynver_memory_check_question",
+        {"items": [{"text": "Who is the lead lawyer?"}]},
+    ))
+
+    assert single["alreadyAnswered"] is True
+    assert batch["alreadyAnswered"] is True
+    assert client.calls == [
+        ("POST", "/memory/question/check", {"text": "What is the Google Maps link?"}, None, 3.0),
+        ("POST", "/memory/question/check", {"items": [{"text": "Who is the lead lawyer?"}]}, None, 3.0),
+    ]
 
 
 @pytest.mark.parametrize("k", [1, 3, 5])
@@ -237,8 +395,8 @@ def test_prefetch_full_view_filters_weak_hits_and_does_not_repeat_seen_memory():
 
 def test_prefetch_does_not_repeat_an_unchanged_index_handle(monkeypatch):
     from plugins.memory.kynver import KynverMemoryProvider
-    import plugins.memory.kynver as kynver
-    import plugins.memory.kynver.context as context
+    from plugins.memory import kynver
+    from plugins.memory.kynver import context
 
     monkeypatch.setattr(kynver, "load_context_settings", lambda: context.KynverContextSettings(
         prefetch_token_budget=128,
@@ -289,8 +447,8 @@ def test_todo_observer_mirrors_via_generic_hook_and_returns_metadata():
     annotation = provider.on_tool_observed("todo_list", {"merge": True}, result, {"tool_call_id": "call-1"})
 
     assert annotation == {"provider": "kynver", "todo_mirror": "synced", "count": 1, "state_updates": 1}
-    create_call = [call for call in client.calls if call[1] == "/tasks"][0]
-    close_call = [call for call in client.calls if call[1] == "/tasks/task-1/close"][0]
+    create_call = next(call for call in client.calls if call[1] == "/tasks")
+    close_call = next(call for call in client.calls if call[1] == "/tasks/task-1/close")
     assert create_call[2]["title"] == "Ship"
     assert create_call[2]["description"] == "Ship"
     assert create_call[2]["idempotencyKey"].startswith("hermes:forge:")
@@ -375,7 +533,7 @@ def test_memory_write_uses_provenance_and_threat_scan():
     )
 
     assert ok["success"] is True
-    memory_call = [call for call in client.calls if call[1] == "/memory"][0]
+    memory_call = next(call for call in client.calls if call[1] == "/memory")
     assert memory_call[0] == "POST"
     assert memory_call[2]["content"] == "User prefers concise answers."
     assert memory_call[2]["sourceId"] == "hermes:forge"
@@ -421,9 +579,9 @@ def test_task_lifecycle_contract_paths_and_payloads():
     json.loads(provider.handle_tool_call("kynver_task_log_event", {"taskId": "task-1", "eventType": "worker_update", "message": "halfway"}))
     json.loads(provider.handle_tool_call("kynver_task_steer", {"taskId": "task-1", "message": "prioritize tests"}))
 
-    close_call = [call for call in client.calls if call[1] == "/tasks/task-1/close"][0]
-    log_call = [call for call in client.calls if call[1] == "/tasks/task-1/events"][0]
-    steer_call = [call for call in client.calls if call[1] == "/tasks/task-1/steer"][0]
+    close_call = next(call for call in client.calls if call[1] == "/tasks/task-1/close")
+    log_call = next(call for call in client.calls if call[1] == "/tasks/task-1/events")
+    steer_call = next(call for call in client.calls if call[1] == "/tasks/task-1/steer")
     assert close_call[2]["status"] == "done"
     assert close_call[2]["summary"] == "done"
     assert log_call[2]["type"] == "worker_update"

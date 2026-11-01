@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Iterable, Optional
 
 BACKGROUND_WORK_MARKER = "[background-work-started:"
 _MARKER_RE = re.compile(r"\[background-work-started:\s*([^\]\n]{1,120})\]")
@@ -33,9 +33,9 @@ def _preview(text: Any) -> str:
     return text if len(text) <= _LABEL_CHARS else text[: _LABEL_CHARS - 1] + "…"
 
 
-def background_work_labels(function_name: str, args: Dict[str, Any], result_text: str) -> List[str]:
+def background_work_labels(function_name: str, args: dict[str, Any], result_text: str) -> list[str]:
     """Names of background work this call started (explicit markers first)."""
-    labels: List[str] = [m.strip() for m in _MARKER_RE.findall(result_text or "")]
+    labels: list[str] = [m.strip() for m in _MARKER_RE.findall(result_text or "")]
     args = args if isinstance(args, dict) else {}
     if function_name == "delegate_task" and args.get("background"):
         action = str(args.get("action") or "").strip().lower()
@@ -57,7 +57,7 @@ def _is_tracked(label: str, active_text: str) -> bool:
     low = label.lower()
     if low in active_text:
         return True
-    bare = low[len("worker-"):] if low.startswith("worker-") else low
+    bare = low.removeprefix("worker-")
     if bare and bare in active_text:
         return True
     words = [w for w in _WORD_RE.findall(low) if w not in _STOP_WORDS][:6]
@@ -66,14 +66,14 @@ def _is_tracked(label: str, active_text: str) -> bool:
     return sum(1 for w in words if w in active_text) * 2 >= len(words)
 
 
-def untracked_work(labels: Iterable[str], todos: Iterable[Dict[str, Any]]) -> List[str]:
+def untracked_work(labels: Iterable[str], todos: Iterable[dict[str, Any]]) -> list[str]:
     active_text = " ".join(
         str(t.get("content") or "").lower() for t in todos if isinstance(t, dict) and t.get("status") in _ACTIVE
     )
     return [label for label in labels if not _is_tracked(label, active_text)]
 
 
-def todo_tracking_hint(agent: Any, function_name: str, args: Dict[str, Any], result: Any) -> Optional[str]:
+def todo_tracking_hint(agent: Any, function_name: str, args: dict[str, Any], result: Any) -> Optional[str]:
     """The hint for this tool result, or None."""
     text = result if isinstance(result, str) else ""
     if function_name not in {"delegate_task", "terminal"} and BACKGROUND_WORK_MARKER not in text:

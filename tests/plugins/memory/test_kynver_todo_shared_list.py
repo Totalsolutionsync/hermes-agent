@@ -15,7 +15,7 @@ e. Kynver down/429 → the local cache answers and the result says so; writes re
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import pytest
 
@@ -35,10 +35,10 @@ class Kynver:
     items, adopt, list window, actor stamps) behind the one ``/todos/session`` endpoint."""
 
     def __init__(self) -> None:
-        self.plans: Dict[str, Dict[str, Any]] = {"inbox": {"title": "Inbox", "inbox": True}}
-        self.rows: Dict[str, List[Dict[str, Any]]] = {"inbox": []}
-        self.bindings: Dict[str, Dict[str, Any]] = {}
-        self.calls: List[Dict[str, Any]] = []
+        self.plans: dict[str, dict[str, Any]] = {"inbox": {"title": "Inbox", "inbox": True}}
+        self.rows: dict[str, list[dict[str, Any]]] = {"inbox": []}
+        self.bindings: dict[str, dict[str, Any]] = {}
+        self.calls: list[dict[str, Any]] = []
         self.clock = 0
         self.down: Optional[KynverAgentOSError] = None
         self.config = type("C", (), {"enabled": True, "api_url": "https://k", "slug": "ghost"})()
@@ -52,10 +52,10 @@ class Kynver:
     def prefix(session_key: str) -> str:
         return f"hermes-todo:{session_key.split(':', 1)[1]}:"
 
-    def row(self, plan: str, key: str) -> Optional[Dict[str, Any]]:
+    def row(self, plan: str, key: str) -> Optional[dict[str, Any]]:
         return next((r for r in self.rows[plan] if r["rowKey"] == key), None)
 
-    def stamp(self, row: Dict[str, Any], status: str, actor: Dict[str, Any], at: int) -> None:
+    def stamp(self, row: dict[str, Any], status: str, actor: dict[str, Any], at: int) -> None:
         row.update(status=status, changedAt=at, source=actor.get("source"), actor=actor.get("name"), ref=actor.get("ref"))
 
     # -- endpoint ------------------------------------------------------------------------
@@ -134,17 +134,17 @@ class Kynver:
                 binding["keys"] |= set(given)
         return self.view(key, adopted)
 
-    def view_rows(self, plan: str, prefix: str) -> List[Dict[str, Any]]:
+    def view_rows(self, plan: str, prefix: str) -> list[dict[str, Any]]:
         rows = self.rows[plan]
         return [r for r in rows if r["rowKey"].startswith(prefix)] if self.plans[plan].get("inbox") else rows
 
     @staticmethod
-    def in_view(row: Dict[str, Any], binding: Dict[str, Any]) -> bool:
+    def in_view(row: dict[str, Any], binding: dict[str, Any]) -> bool:
         if row["status"] in _UNFINISHED or row["rowKey"] in binding["keys"]:
             return True
         return binding["start"] is not None and row["changedAt"] > binding["start"]
 
-    def view(self, key: str, adopted: bool) -> Dict[str, Any]:
+    def view(self, key: str, adopted: bool) -> dict[str, Any]:
         binding = self.bindings[key]
         plan = binding["plan"]
         prefix = self.prefix(key)
@@ -152,7 +152,7 @@ class Kynver:
         for r in sorted(self.view_rows(plan, prefix), key=lambda r: r["ordinal"]):
             if not self.in_view(r, binding):
                 continue
-            item = {"id": r["rowKey"][len(prefix):] if r["rowKey"].startswith(prefix) else r["rowKey"],
+            item = {"id": r["rowKey"].removeprefix(prefix),
                     "content": r["title"], "status": _TO_HERMES[r["status"]], "rowKey": r["rowKey"]}
             if r["ref"] and r["ref"] != key:
                 item["by"] = {"name": r["actor"] or r["source"], "source": r["source"], "at": None}
@@ -176,7 +176,7 @@ def store(kynver: Kynver, scope, **kw) -> KynverTodoStore:
     return KynverTodoStore(kynver, linkage=linkage(), scope=scope, plan_resolver=_Resolver(), **kw)
 
 
-def call(s: KynverTodoStore, **kw) -> Dict[str, Any]:
+def call(s: KynverTodoStore, **kw) -> dict[str, Any]:
     return json.loads(todo_tool(store=s, **kw))
 
 

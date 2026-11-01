@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 EXIT_CLEAN = 0
 EXIT_STALE = 1
@@ -33,7 +33,7 @@ def _client() -> Any:
     return KynverAgentOSClient()
 
 
-def _findings_json(findings: List[Any]) -> str:
+def _findings_json(findings: list[Any]) -> str:
     return json.dumps(
         [
             {
@@ -52,7 +52,7 @@ def _findings_json(findings: List[Any]) -> str:
     )
 
 
-def _check(paths: List[str], client: Any) -> Optional[List[Any]]:
+def _check(paths: list[str], client: Any) -> Optional[list[Any]]:
     from plugins.memory.kynver.blockers import check_statements, collect_statements
 
     statements = collect_statements(paths)
@@ -96,7 +96,7 @@ def cmd_scan(args: Any, client: Any = None) -> int:
     return EXIT_CLEAN
 
 
-def _guard(paths: List[str], client: Any) -> Optional[List[Any]]:
+def _guard(paths: list[str], client: Any) -> Optional[list[Any]]:
     """Manual-step / replaced-note lines checked against Kynver. [] when the server predates the route."""
     from plugins.memory.kynver.manual_steps import RouteMissing, check_guard_statements, find_guard_statements
     from plugins.memory.kynver.blockers import iter_files
@@ -104,22 +104,26 @@ def _guard(paths: List[str], client: Any) -> Optional[List[Any]]:
     statements = []
     for f in iter_files(paths):
         try:
-            statements.extend(find_guard_statements(str(f), f.read_text(encoding="utf-8", errors="replace")))
+            statements.extend(find_guard_statements(str(f), f.read_text(encoding="utf-8-sig", errors="replace")))
         except OSError:
             continue
     if not statements:
         return []
     try:
-        return check_guard_statements(client, statements)
+        findings = check_guard_statements(client, statements)
     except RouteMissing:
         print("  Kynver has no manual-step check yet; skipped the by-hand / replaced-note lines.", file=sys.stderr)
         return []
     except Exception as exc:
         print(f"  Could not check by-hand steps with Kynver: {exc}", file=sys.stderr)
         return None
+    # A line restating the newest version of a replaced rule is correct, not stale (18 Oct).
+    from plugins.memory.kynver.replaced_check import refine_replaced
+
+    return refine_replaced(findings, client)
 
 
-def _guard_json(findings: List[Any]) -> List[dict]:
+def _guard_json(findings: list[Any]) -> list[dict]:
     return [
         {
             "path": g.statement.path,
@@ -130,6 +134,7 @@ def _guard_json(findings: List[Any]) -> List[dict]:
             "replaced": g.replaced,
             "retiredManualSteps": g.retired_manual_steps,
             "advice": g.advice,
+            "cleared": g.cleared,
         }
         for g in findings
     ]
@@ -148,8 +153,10 @@ def cmd_check_brief(args: Any, client: Any = None) -> int:
         return EXIT_UNAVAILABLE
     stale = [f for f in findings if f.stale]
     outdated = [g for g in guard if g.stale]
+    cleared = [g for g in guard if g.cleared and not g.stale]
     if args.json:
-        print(json.dumps({"blockers": json.loads(_findings_json(stale)), "manualSteps": _guard_json(outdated)}, indent=2))
+        print(json.dumps({"blockers": json.loads(_findings_json(stale)), "manualSteps": _guard_json(outdated),
+                          "clearedReplaced": _guard_json(cleared)}, indent=2))
     elif stale or outdated:
         if stale:
             print(f"  {len(stale)} stale blocker(s) in {args.brief}: the fix already shipped. Update the brief before launching.")
@@ -159,7 +166,11 @@ def cmd_check_brief(args: Any, client: Any = None) -> int:
             print(f"  {len(outdated)} outdated line(s) in {args.brief}: memory says these are automated or were replaced. Update the brief; don't ask Will to do them by hand.")
             for g in outdated:
                 print(f"  {describe_guard(g)}")
-    else:
+    if cleared and not args.json:
+        print(f"  {len(cleared)} line(s) matched a replaced note but agree with the newest one (not flagged):")
+        for g in cleared:
+            print(f"  ok {g.statement.path}:{g.statement.line_no}  {g.cleared[0].get('why')}")
+    if not args.json and not (stale or outdated):
         print(
             f"  No stale blockers or outdated by-hand steps in {args.brief} "
             f"({len(findings)} limitation statement(s), {len(guard)} by-hand/advice line(s) checked)."

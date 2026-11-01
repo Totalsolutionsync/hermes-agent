@@ -59,7 +59,7 @@ def file_lock(name: str) -> Iterator[None]:
         if fcntl is None:
             yield
             return
-        fd = open(state_dir() / f"{name}.lock", "a+")
+        fd = open(state_dir() / f"{name}.lock", "a+", encoding="utf-8")  # windows-footgun: ok (lock handle, never read)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
@@ -88,7 +88,7 @@ def atomic_write_json(path: Path, data: Any) -> None:
 
 def read_json(path: Path, default: Any) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return default
 

@@ -10,7 +10,7 @@ injection, and that ``kynver_memory_decision_check`` asks Kynver's decision chec
 from __future__ import annotations
 
 import json
-from typing import Any, List, Tuple
+from typing import Any
 
 from plugins.memory.kynver.todo_session import parse_view
 from tools.todo_tool import TodoStore, _todo_payload, format_checklist
@@ -55,14 +55,14 @@ def test_nothing_extra_when_no_item_is_flagged():
 
 def test_injection_after_compression_carries_the_flag():
     store = TodoStore()
-    store._items = _view().items  # noqa: SLF001 — same path KynverTodoStore.format_for_injection uses
+    store._items = _view().items
     text = store.format_for_injection() or ""
     assert f"schedule Rufford Ford v1 Sun (pending) — {FLAG} (do not act on it)" in text
 
 
 class _StubClient:
     def __init__(self) -> None:
-        self.calls: List[Tuple[str, Any]] = []
+        self.calls: list[tuple[str, Any]] = []
 
     def get(self, path: str, *, slug: Any = None, timeout: Any = None) -> Any:
         self.calls.append((path, timeout))

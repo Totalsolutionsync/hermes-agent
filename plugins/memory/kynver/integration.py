@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
-from typing import Any, List, Mapping, Optional
+from typing import Any, Mapping, Optional
 
 from agent.operating_prompt import register_operating_prompt_hook
 
@@ -22,7 +22,7 @@ _PROMPT_HOOK_REGISTERED = False
 
 # session id -> resolved todo scope, for the pre_tool_call guard, which only receives the
 # session id. Session ids are globally unique, so this is not profile state.
-_SESSION_SCOPES: "OrderedDict[str, str]" = OrderedDict()
+_SESSION_SCOPES: OrderedDict[str, str] = OrderedDict()
 _SESSION_SCOPES_MAX = 512
 
 
@@ -210,8 +210,8 @@ def configure_agent(
     )
 
 
-def get_prompt_blocks(agent: Any) -> List[str]:
-    blocks: List[str] = []
+def get_prompt_blocks(agent: Any) -> list[str]:
+    blocks: list[str] = []
     if getattr(agent, "_kynver_degraded", False):
         blocks.append(
             "[Kynver: degraded mode — todo/current-focus may use local Hermes fallback]"

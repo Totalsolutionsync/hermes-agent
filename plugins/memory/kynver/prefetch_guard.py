@@ -42,7 +42,7 @@ class PrefetchGuard:
         self._clock = clock
         self._lock = threading.Lock()
         self._cooldown_until = 0.0
-        self._entries: "OrderedDict[str, tuple[float, Any]]" = OrderedDict()
+        self._entries: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 
     @staticmethod
     def _key(query: str) -> str:

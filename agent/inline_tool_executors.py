@@ -13,7 +13,7 @@ import json
 import time
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Optional
 
 from tools.arg_coercion import coerce_tool_args
 
@@ -141,7 +141,7 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
 
 
 def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
-    def _metadata() -> Dict[str, Any]:
+    def _metadata() -> dict[str, Any]:
         return agent._build_memory_write_metadata(task_id=ctx.effective_task_id, tool_call_id=ctx.tool_call_id)
 
     # A first-class provider (Kynver-first mode) may own scoped writes; local memory is the fallback.

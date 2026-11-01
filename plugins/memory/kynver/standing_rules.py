@@ -227,8 +227,8 @@ __all__: Sequence[str] = (
     "TopicPolicy",
     "fit_standing_rules",
     "parse_topic_policy",
-    "topic_policy_always_block",
-    "topic_policy_turn_block",
     "standing_rules_notice",
     "summarize_for_status",
+    "topic_policy_always_block",
+    "topic_policy_turn_block",
 )

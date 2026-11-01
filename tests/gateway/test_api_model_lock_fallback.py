@@ -84,3 +84,72 @@ def test_locked_turn_served_by_another_runtime_settles_failed(api):
         api_execution.reset(token)
     assert result['failed'] is True and result['completed'] is False and result['final_response'] == ''
     assert 'confirmed model lock runtime mismatch' in result['error']
+
+
+def _settle(api, agent, settings):
+    from gateway.run_turn_runner import _settle_api_runtime_lock
+    from gateway.session_api_turn import api_execution
+
+    result, captured = {'final_response': 'OK', 'completed': True}, {'usage': {}}
+    token = api_execution.set({'adapter': api, 'settings': settings})
+    try:
+        _settle_api_runtime_lock(agent, result, captured)
+    finally:
+        api_execution.reset(token)
+    return result, captured
+
+
+def test_unlocked_requested_turn_reports_the_served_runtime(api):
+    """A per-request provider/model (no lock) still reports which runtime answered, so a
+    ``/v1/runs`` caller can show the served model instead of an empty ``runtime``."""
+    from types import SimpleNamespace
+
+    agent = SimpleNamespace(provider='custom', model='qwen-3-6-plus', _hermes_api_runtime={'provider': 'custom'})
+    result, captured = _settle(api, agent, {
+        'requested_runtime': {'provider': 'venice', 'model': 'qwen-3-6-plus'}, 'route_source': 'raw_request'})
+    runtime = captured['usage']['runtime']
+    assert result['final_response'] == 'OK' and result['completed'] is True
+    assert runtime['model'] == 'qwen-3-6-plus' and runtime['provider'] == 'custom'
+    assert runtime['requested'] == {'provider': 'venice', 'model': 'qwen-3-6-plus'}
+    assert runtime.get('model_lock', '') == ''
+
+
+def test_unlocked_mismatch_never_fails_the_turn(api):
+    """Only a confirmed lock refuses a turn served elsewhere; an unlocked request's fallback
+    answer stands and simply reports the runtime that served it."""
+    from types import SimpleNamespace
+
+    agent = SimpleNamespace(provider='anthropic', model='claude-opus-5-5', _hermes_api_runtime={})
+    result, captured = _settle(api, agent, {
+        'requested_runtime': {'provider': 'venice', 'model': 'qwen-3-6-plus'}, 'route_source': 'raw_request'})
+    assert result['completed'] is True and result['final_response'] == 'OK'
+    assert captured['usage']['runtime']['model'] == 'claude-opus-5-5'
+
+
+def test_global_turn_without_a_route_attaches_nothing(api):
+    from types import SimpleNamespace
+
+    agent = SimpleNamespace(provider='anthropic', model='claude-opus-5-5', _hermes_api_runtime={})
+    _, captured = _settle(api, agent, {'route_source': 'global'})
+    assert 'runtime' not in captured['usage']
+
+
+def test_runs_runtime_contract_kynver_reads(api):
+    """Cross-repo contract (Kynver agent tabs model pin, Kynver PR #4895): the box reads
+    ``runtime.provider`` / ``runtime.model`` (top-level strings) off ``run.completed`` and
+    ``GET /v1/runs/{id}`` to say which model answered a pinned turn, and treats an empty
+    ``model`` as "Hermes did not say". Pin that shape through the same sanitizer the
+    ``/v1/runs`` handler applies before ``_finish`` publishes it."""
+    from types import SimpleNamespace
+
+    requested = {'provider': 'venice', 'model': 'qwen-3-6-plus'}
+    agent = SimpleNamespace(provider='custom', model='qwen-3-6-plus', _hermes_api_runtime={'provider': 'custom'})
+    _, captured = _settle(api, agent, {'requested_runtime': requested, 'route_source': 'raw_request'})
+    wire = api._sanitize_runtime_metadata(runtime=captured['usage']['runtime'], requested_runtime=requested)
+    assert wire == {'provider': 'custom', 'model': 'qwen-3-6-plus', 'route_source': 'raw_request',
+                    'requested': {'provider': 'venice', 'model': 'qwen-3-6-plus'}}
+
+    # A global (unrouted) turn reports no served pair: the model id is empty, never invented.
+    agent = SimpleNamespace(provider='anthropic', model='claude-opus-5-5', _hermes_api_runtime={})
+    _, captured = _settle(api, agent, {'route_source': 'global'})
+    assert api._sanitize_runtime_metadata(runtime=captured['usage'].get('runtime'))['model'] == ''

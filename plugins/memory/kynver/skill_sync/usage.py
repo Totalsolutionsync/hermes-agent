@@ -31,7 +31,7 @@ def _path():
 
 def _read_lines() -> list[str]:
     try:
-        return [ln for ln in _path().read_text(encoding="utf-8").splitlines() if ln.strip()]
+        return [ln for ln in _path().read_text(encoding="utf-8-sig").splitlines() if ln.strip()]
     except OSError:
         return []
 

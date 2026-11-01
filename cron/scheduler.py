@@ -30,7 +30,7 @@ except ImportError:
     except ImportError:
         msvcrt = None
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Union
+from typing import Any, Optional, Protocol
 
 # Must precede repo-level imports: standalone invocations (e.g. module reload after
 # `hermes update`) otherwise fail with ModuleNotFoundError for hermes_time et al.
@@ -161,7 +161,7 @@ def _failure_streak_nudge(job: dict) -> str:
 
 
 _TRANSIENT_INFRA_SKIP_RE = re.compile(
-    r"cron admission missing|cron execution unverified|gateway connection failed", re.I)
+    r"cron admission missing|cron execution unverified|gateway connection failed", re.IGNORECASE)
 
 
 def _is_transient_infra_skip(job: dict, error: str) -> bool:

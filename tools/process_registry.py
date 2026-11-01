@@ -28,7 +28,7 @@ _IS_LINUX = platform.system() == "Linux"
 from tools.environments.local import _find_shell, _resolve_safe_cwd, _sanitize_subprocess_env, _terminal_env
 from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, NamedTuple, Optional
+from typing import Any, Literal, NamedTuple, Optional
 
 from hermes_cli.config import get_hermes_home
 
@@ -200,11 +200,10 @@ def _systemd_scope_oom_policy_supported() -> bool:
     global _scope_oom_policy_supported
     if _scope_oom_policy_supported is None:
         try:
-            first = subprocess.run(
-                ["systemctl", "--version"], capture_output=True, text=True, timeout=5,
-            ).stdout.split("\n", 1)[0]
+            first = subprocess.run(["systemctl", "--version"], stdin=subprocess.DEVNULL, capture_output=True,
+                                   text=True, timeout=5, check=False).stdout.split("\n", 1)[0]
             _scope_oom_policy_supported = int(first.split()[1]) >= _SCOPE_OOM_POLICY_MIN_SYSTEMD
-        except Exception:  # noqa: BLE001 — unknown version: keep the safe default
+        except Exception:
             _scope_oom_policy_supported = False
     return _scope_oom_policy_supported
 

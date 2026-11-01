@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS
+from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
 from hermes_cli.config import load_config, save_config
 from tools.memory_tool import MemoryStore, apply_memory_pending
 from tools.registry import registry
@@ -21,7 +21,7 @@ def _call(route, store, args):
         return apply_memory_pending({"action": "batch", **args}, store)
     if route == "inline":
         agent = SimpleNamespace(_memory_store=store, _memory_manager=None)
-        return json.loads(INLINE_TOOL_EXECUTORS["memory"](agent, args, None))
+        return json.loads(INLINE_TOOL_EXECUTORS["memory"](agent, args, InlineToolContext(effective_task_id="")))
     return json.loads(registry.dispatch("memory", args, store=store))
 
 
