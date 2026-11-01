@@ -121,19 +121,31 @@ from gateway.session_execution import GatewaySessionAgentMixin
 
 
 def _settle_api_runtime_lock(agent, result, captured):
-    """A confirmed API model lock settles only on the runtime it named (main's
-    ``_finish_turn_result``): the served runtime rides the usage, a mismatch fails the turn."""
-    from gateway.session_api_turn import api_runtime_locked
-    api = api_runtime_locked()
+    """The served runtime rides the usage of every canonical API turn (``GET /v1/runs/{id}`` and
+    ``run.completed`` name the provider/model that actually answered, as main's
+    ``_finish_turn_result`` does). A confirmed API model lock settles only on the runtime it
+    named: a mismatch fails the turn."""
+    from gateway.session_api_turn import api_execution
+    api = api_execution.get()
     if api is None or not isinstance(result, dict):
         return
     settings = api['settings']
+    locked = bool(settings.get('confirmed_runtime_lock'))
+    route_source = settings.get('route_source') or ''
+    if not (locked or settings.get('route') or settings.get('requested_runtime')
+            or (route_source and route_source != 'global')):
+        return
     try:
         captured['usage']['runtime'] = api['adapter']._turn_runtime_metadata(
             agent, route=settings.get('route'), requested_runtime=settings.get('requested_runtime'),
-            route_source=settings.get('route_source') or '', confirmed_runtime_lock=True)
+            route_source=route_source, confirmed_runtime_lock=locked)
     except RuntimeError as exc:
-        result.update(final_response='', failed=True, completed=False, error=str(exc))
+        if locked:
+            result.update(final_response='', failed=True, completed=False, error=str(exc))
+    except Exception:
+        # Metadata only: an unlocked turn's answer never fails on reporting its runtime.
+        if locked:
+            raise
 
 
 def _resolution_failure_reply(exc: Exception, platform: Platform) -> tuple[str, str, bool]:
