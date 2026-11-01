@@ -116,6 +116,7 @@ def session_call(
     label: Optional[str] = None,
     actor_source: str = "hermes-chat",
     task_id: Optional[str] = None,
+    chat_key: Optional[str] = None,
 ) -> SessionView:
     """Read (``todos is None``) or write the scope's list; raises SessionEndpointMissing on an
     older Kynver and KynverAgentOSError (with ``status``) on any other failure."""
@@ -126,6 +127,8 @@ def session_call(
     }
     if label:
         body["label"] = label
+    if chat_key:  # a Kynver agent tab's own list (X-Kynver-Chat-Key via the api_server)
+        body["chatKey"] = chat_key
     if task_id:
         body["hints"] = {"taskId": task_id}
     if adopt:

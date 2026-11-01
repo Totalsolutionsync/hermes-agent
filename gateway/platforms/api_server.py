@@ -2260,6 +2260,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "provider": runtime_kwargs.get("provider") or getattr(agent, "provider", "") or "",
             "model": getattr(agent, "model", None) or model,
             "route_source": route_source}
+        from gateway.platforms.api_server_chat_key import chat_key_for_session
+        agent._kynver_chat_key = chat_key_for_session(session_id)  # Kynver todo store: tab's own list
         return agent
 
     # -- HTTP handlers ----------------------------------------------------------------
