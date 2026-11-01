@@ -139,6 +139,8 @@ class GuardFinding:
     replaced: List[dict] = field(default_factory=list)
     retired_manual_steps: List[dict] = field(default_factory=list)
     advice: str = ""
+    # Replaced matches cleared by replaced_check (the line agrees with the newest note), with why.
+    cleared: List[dict] = field(default_factory=list)
 
     @property
     def stale(self) -> bool:
@@ -185,9 +187,10 @@ def describe_guard(finding: GuardFinding) -> str:
     where = f"{s.path}:{s.line_no}"
     if finding.replaced:
         top = finding.replaced[0]
+        why = f"\n       why: {top['why']}" if top.get("why") else ""
         return (
-            f"REPLACED {where}  repeats memory {top.get('slug')}, replaced by {top.get('replacedBy') or 'a newer note'}\n"
-            f"       \"{s.text}\""
+            f"REPLACED {where}  repeats memory {top.get('slug')}, replaced by {top.get('newest') or top.get('replacedBy') or 'a newer note'}\n"
+            f"       \"{s.text}\"{why}"
         )
     top = (finding.automation or finding.retired_manual_steps or [{}])[0]
     when = str(top.get("updatedAt") or "")[:10]
