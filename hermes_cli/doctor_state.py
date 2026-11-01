@@ -512,6 +512,24 @@ def _check_cron_store(should_fix: bool, f: Finding) -> None:
 
 
 @doctor_check()
+def _check_pending_memory_queue(should_fix: bool, f: Finding) -> None:
+    """Pending memory queue bounded: count <= memory.pending_max_open and nothing older than the TTL."""
+    from tools import memory_pending_hygiene as hygiene
+    health = hygiene.queue_health()
+    if health["ok"]:
+        return check_ok(f"Pending memory queue bounded ({health['count']}/{health['cap']} open, "
+                        f"none older than {health['ttl_days']:g}d)")
+    problems = []
+    if health["count"] > health["cap"]:
+        problems.append(f"{health['count']} open (cap {health['cap']})")
+    if health["expired"]:
+        problems.append(f"{len(health['expired'])} older than {health['ttl_days']:g}d")
+    check_warn("Pending memory queue not bounded: " + ", ".join(problems))
+    f.issues.append("Review pending memory with /memory pending (approve or discard); stale records are "
+                    "dropped automatically on the next background review proposal")
+
+
+@doctor_check()
 def _check_checkpoint_store(should_fix: bool, f: Finding) -> None:
     """/rollback store footprint: warn when checkpoints are on and the store sits above its cap."""
     from tools.checkpoint_maintenance import checkpoint_footprint_notice

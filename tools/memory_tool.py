@@ -81,6 +81,14 @@ def _pin_matched_entries(store: MemoryStore, payload: dict[str, Any]) -> Optiona
     return None if result.get("success") else json.dumps(result, ensure_ascii=False)
 
 
+def _not_staged_result(outcome: dict[str, Any]) -> str:
+    """Tool result for a proposal the pending-queue hygiene declined to stage (nothing to review)."""
+    why = {"cosmetic": "it only rewords the entry (no fact added or removed)",
+           "cap": f"{outcome['total']} memory changes are already waiting for review"}[outcome["skipped"]]
+    return json.dumps({"success": True, "staged": False, "skipped": outcome["skipped"],
+                       "message": f"Nothing staged: {why}. Do not re-propose this."}, ensure_ascii=False)
+
+
 def _gate_or_stage(store: MemoryStore, summary: str, detail: str, payload: dict[str, Any]) -> Optional[str]:
     """JSON tool-result string when the write must NOT proceed (blocked or staged
     for approval), None to proceed. Fails open if the gate module can't load."""
@@ -97,7 +105,11 @@ def _gate_or_stage(store: MemoryStore, summary: str, detail: str, payload: dict[
     if (unmatched := _pin_matched_entries(store, payload)) is not None:
         return unmatched
     FAILURE_CLASS.set("staged")
-    record = wa.stage_write(wa.MEMORY, payload, summary=f"{summary}: {detail[:120]}", origin=wa.current_origin())
+    from tools import memory_pending_hygiene as hygiene
+    outcome = hygiene.stage(store, payload, summary=f"{summary}: {detail[:120]}", origin=wa.current_origin())
+    record = outcome["record"]
+    if record is None:
+        return _not_staged_result(outcome)
     return json.dumps({"success": True, "staged": True, "pending_id": record["id"], "message": decision.message},
                       ensure_ascii=False)
 
@@ -198,18 +210,27 @@ def _background_delete_gate(store, action, operations, target="memory", content=
     try:
         if (unmatched := _pin_matched_entries(store, payload)) is not None:
             return unmatched
+        from tools import memory_pending_hygiene as hygiene
         from tools import write_approval as wa
         FAILURE_CLASS.set("staged")
-        record = wa.stage_write(
-            wa.MEMORY, payload,
+        outcome = hygiene.stage(
+            store, payload,
             summary=(f"background review consolidation ({'batch' if operations is not None else action} "
                      f"on {target}): {detail}")[:200],
             origin=wa.current_origin())
+        record = outcome["record"]
+        if record is None:
+            return _not_staged_result(outcome)
+        total = outcome["total"]
+        replaced = f" It replaces {len(outcome['superseded'])} older proposal(s) for the same entry." \
+            if outcome["superseded"] else ""
         return json.dumps({
-            "success": True, "staged": True, "proposal_staged": True, "pending_id": record["id"],
-            "message": ("Background review may not delete memory entries unattended. The proposed "
-                        f"{'batch' if operations is not None else action} was staged for your approval — "
-                        "review it with /memory pending (approve to apply, discard to drop)."),
+            "success": True, "staged": True,
+            # Only the first proposal of each nag window is surfaced to the user (Telegram etc.).
+            "proposal_staged": hygiene.should_nag(), "pending_id": record["id"], "pending_total": total,
+            "message": (f"{total} memory change(s) now waiting for your approval — background review may not "
+                        f"delete memory entries unattended.{replaced} Review with /memory pending "
+                        "(approve to apply, discard to drop)."),
         }, ensure_ascii=False)
     except Exception:
         logger.warning("Failed to stage background-review consolidation; denying", exc_info=True)

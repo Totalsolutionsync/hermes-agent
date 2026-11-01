@@ -378,6 +378,9 @@ _MEMORY_ROUTING_BLOCK = (
     "their size limits and crowds out the facts that matter; misrouting it puts it where the next "
     "session won't look. If the tool schema lists only one "
     "target, that store is the only one enabled — use it and skip the other.\n\n"
+    "Never patch, replace or remove an existing entry just to reword, reorder or shorten it: only "
+    "edit one to add, correct or delete a FACT. Edits to existing entries wait for a human, and "
+    "rewordings are discarded. If the tool says changes are already waiting for review, stop.\n\n"
 )
 
 _MEMORY_REVIEW_PROMPT = (
@@ -1318,6 +1321,21 @@ def _run_review_in_thread(
         _set_thread_approval_callback(None)
 
 
+def _skip_memory_review(agent: Any) -> bool:
+    """Skip a memory-only consolidation pass when it cannot produce anything new: memory is unchanged
+    since the last staged proposal, or the pending queue is already at its cap."""
+    try:
+        from tools import memory_pending_hygiene as hygiene
+        store = getattr(agent, "_memory_store", None)
+        reason = hygiene.should_skip_review(store) if store is not None else None
+    except Exception:
+        logger.debug("memory review skip check failed; reviewing", exc_info=True)
+        return False
+    if reason:
+        logger.info("Background memory review skipped: %s", reason)
+    return bool(reason)
+
+
 # (review_memory, review_skills) -> prompt attribute name; skills-only is also the default.
 _PROMPT_NAME_BY_SCOPE = {
     (True, True): "_COMBINED_REVIEW_PROMPT", (True, False): "_MEMORY_REVIEW_PROMPT",
@@ -1349,6 +1367,8 @@ def spawn_background_review_thread(
         )
 
     def _target() -> None:  # resolves _run_review_in_thread at call time (tests patch it)
+        if review_memory and not review_skills and not explicit and _skip_memory_review(agent):
+            return
         _run_review_in_thread(
             agent, messages_snapshot, prompt, task_cfg=task_cfg, review_run=review_run,
             review_memory=review_memory, explicit=explicit)

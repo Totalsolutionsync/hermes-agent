@@ -57,6 +57,20 @@ def run_preflight_gate(
         v.action = "break"
         return v
 
+    from agent.provider_spend_cap import cap_reached_message
+    if _spend_cap_message := cap_reached_message(getattr(agent, "provider", "")):
+        v.final_response = _spend_cap_message
+        v.failed = True
+        v._turn_exit_reason = "provider_daily_spend_cap"
+        append_message(messages, {"role": "assistant", "content": v.final_response})
+        agent._emit_diagnostic_status("❌ " + _spend_cap_message)
+        v.api_call_count -= 1
+        agent._api_call_count = v.api_call_count
+        with suppress(Exception):
+            agent.iteration_budget.refund()
+        v.action = "break"
+        return v
+
     # Pre-API pressure check: tool results grow a turn and last_prompt_tokens lags
     # them. Mirror the turn-prologue guard chain: defer on noisy estimate, skip in
     # failure cooldown, then should_compress().
