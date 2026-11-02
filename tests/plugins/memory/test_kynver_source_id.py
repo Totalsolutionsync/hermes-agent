@@ -3,7 +3,13 @@
 import pytest
 
 from plugins.memory.kynver.compaction_flush import is_security_lane_content
-from plugins.memory.kynver.source_id import resolve_flush_source_id, resolve_source_id
+from plugins.memory.kynver.source_id import (
+    agent_display_name,
+    context_tag,
+    resolve_flush_source_id,
+    resolve_source_id,
+    skill_sync_source_id,
+)
 
 
 def _home(tmp_path, monkeypatch, *, profile=None, soul=None, config=None):
@@ -55,9 +61,55 @@ def test_config_name_beats_soul(tmp_path, monkeypatch):
     assert resolve_source_id() == "hermes:ada-lovelace"
 
 
-def test_unnamed_default_is_never_forge(tmp_path, monkeypatch):
+def test_unnamed_default_sets_no_source_so_kynver_infers_it(tmp_path, monkeypatch):
     _home(tmp_path, monkeypatch, soul="You are Hermes Agent, built by Nous Research.")
-    assert resolve_source_id() == "hermes:agent"
+    assert resolve_source_id() is None
+    assert resolve_flush_source_id() is None
+    assert agent_display_name() is None
+    assert context_tag() == "hermes"
+    assert skill_sync_source_id() == "hermes:agent"
+
+
+def test_explicit_source_id_in_profile_config_wins(tmp_path, monkeypatch):
+    _home(
+        tmp_path,
+        monkeypatch,
+        profile="fortress",
+        soul="Your name is Forge.",
+        config="kynver:\n  source_id: hermes:shade:flush\n",
+    )
+    assert resolve_source_id() == "hermes:shade"
+    assert resolve_flush_source_id() == "hermes:shade:flush"
+
+
+def test_shade_provenance_names_shade(tmp_path, monkeypatch):
+    _home(tmp_path, monkeypatch, profile="fortress", soul="Your name is Shade.")
+    assert agent_display_name() == "Shade"
+    assert context_tag() == "hermes-shade"
+
+
+def test_unnamed_flush_body_omits_source(tmp_path, monkeypatch):
+    from plugins.memory.kynver.compaction_flush import build_memory_body
+
+    _home(tmp_path, monkeypatch)
+    body = build_memory_body(
+        {"text": "Deploys run on Tuesdays.", "kind": "fact", "confidence": 0.9},
+        session_id="s1",
+        provenance={},
+    )
+    assert "sourceId" not in body
+
+
+def test_shade_flush_body_uses_shade_flush(tmp_path, monkeypatch):
+    from plugins.memory.kynver.compaction_flush import build_memory_body
+
+    _home(tmp_path, monkeypatch, profile="fortress", soul="Your name is Shade.")
+    body = build_memory_body(
+        {"text": "Deploys run on Tuesdays.", "kind": "fact", "confidence": 0.9},
+        session_id="s1",
+        provenance={},
+    )
+    assert body["sourceId"] == "hermes:shade:flush"
 
 
 def test_unnamed_named_profile_uses_profile(tmp_path, monkeypatch):

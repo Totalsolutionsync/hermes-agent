@@ -45,7 +45,7 @@ from .contract import (
     task_update_path,
     todo_to_task_record,
 )
-from .source_id import resolve_source_id
+from .source_id import agent_display_name, context_tag, resolve_source_id
 from .compaction_flush import CompactionFactFlusher, flush_enabled
 from .context import (
     fit_whole_items,
@@ -137,8 +137,6 @@ def classify_kynver_memory_scope(
     return False
 
 RUNTIME = "hermes"
-CALL_SIGN = "Forge"
-CONTEXT_TAG = "hermes-forge"
 _COMPACTION_FLUSH_BLOCKED_CONTEXTS = frozenset({"cron", "subagent", "delegated", "delegate"})
 DEFAULT_SEARCH_LIMIT = 5
 
@@ -405,8 +403,8 @@ class KynverMemoryProvider(MemoryProvider):
     def _provenance(self) -> dict[str, Any]:
         data = {
             "runtime": RUNTIME,
-            "callSign": CALL_SIGN,
-            "contextTag": CONTEXT_TAG,
+            "callSign": agent_display_name(),
+            "contextTag": context_tag(),
             "sourceId": resolve_source_id(),
             "hermesSessionId": self._session_id,
             "agentOSSessionId": self._agentos_session_id,
@@ -414,6 +412,8 @@ class KynverMemoryProvider(MemoryProvider):
             "agentWorkspace": self._agent_workspace,
             "observedAt": _now_iso(),
         }
+        # Unnamed profile: no source / call sign; Kynver tags the write from the key's binding.
+        data = {k: v for k, v in data.items() if v is not None}
         if self._agent_identity:
             data["agentIdentity"] = self._agent_identity
         if self._user_id:
@@ -1067,7 +1067,7 @@ class KynverMemoryProvider(MemoryProvider):
                 read_back_reconciled=read_back,
             )
             tasks = [
-                todo_to_task_record(todo, resolve_source_id())
+                todo_to_task_record(todo, resolve_source_id() or RUNTIME)
                 for todo in todos
                 if isinstance(todo, dict)
             ]
@@ -1277,7 +1277,7 @@ class KynverMemoryProvider(MemoryProvider):
             meta.get("correctionEventKey") or meta.get("correction_event_key") or ""
         )
         idempotency_key = make_idempotency_key(
-            resolve_source_id(),
+            resolve_source_id() or RUNTIME,
             "memory.write",
             action_norm,
             envelope_id or self._agentos_session_id,
@@ -1579,7 +1579,7 @@ class KynverMemoryProvider(MemoryProvider):
             return tool_error("title is required")
         description = str(args.get("description") or "")
         idempotency_key = str(args.get("idempotencyKey") or "").strip() or make_idempotency_key(
-            resolve_source_id(),
+            resolve_source_id() or RUNTIME,
             "task.create",
             self._session_id,
             title,
@@ -1693,7 +1693,7 @@ class KynverMemoryProvider(MemoryProvider):
                 "payload": payload_body,
                 "artifactVisibility": args.get("artifactVisibility"),
                 "eventKey": str(args.get("eventKey") or "").strip() or make_idempotency_key(
-                    resolve_source_id(),
+                    resolve_source_id() or RUNTIME,
                     "task.event",
                     self._session_id,
                     task_id,
@@ -1722,7 +1722,7 @@ class KynverMemoryProvider(MemoryProvider):
                 "message": message,
                 "detail": detail,
                 "eventKey": str(args.get("eventKey") or "").strip() or make_idempotency_key(
-                    resolve_source_id(),
+                    resolve_source_id() or RUNTIME,
                     "task.steer",
                     self._session_id,
                     task_id,
