@@ -146,6 +146,28 @@ def todo_session_label(agent: Any) -> Optional[str]:
     return where if platform in _UNNAMED_PLATFORMS else None
 
 
+def todo_chat_key(agent: Any) -> Optional[str]:
+    """The Kynver tab key (``X-Kynver-Chat-Key``) for this agent's chat, whichever path built it.
+
+    ``_kynver_chat_key`` is only set when the api_server builds the agent itself; turns routed
+    through the gateway runner (session authority) build it elsewhere, so fall back to the key the
+    api_server remembered for the agent's session id, or for the id inside the gateway session key
+    (``agent:main:api_server:dm:<session id>``). Other platforms never have a remembered key."""
+    key = getattr(agent, "_kynver_chat_key", None)
+    if key:
+        return key
+    from gateway.platforms.api_server_chat_key import chat_key_for_session
+
+    session_id = str(getattr(agent, "session_id", "") or "").strip()
+    key = chat_key_for_session(session_id) if session_id else None
+    if key:
+        return key
+    session_key = str(getattr(agent, "_gateway_session_key", "") or "")
+    if ":api_server:" in session_key:
+        return chat_key_for_session(session_key.rsplit(":", 1)[-1])
+    return None
+
+
 def todo_actor_source(agent: Any) -> str:
     """``hermes-cron`` for scheduled runs (worker reviews tick items they did not create)."""
     return "hermes-cron" if str(getattr(agent, "platform", "") or "").lower() == "cron" else "hermes-chat"
@@ -196,7 +218,7 @@ def configure_agent(
         scope=lambda: session_todo_scope(agent),
         plan_resolver=shared_plan_resolver(client, linkage),
         label=lambda: todo_session_label(agent),
-        chat_key=lambda: getattr(agent, "_kynver_chat_key", None),
+        chat_key=lambda: todo_chat_key(agent),
         actor_source=todo_actor_source(agent),
         scope_for_session=lambda session_id: scope_for_session_id(agent, session_id),
     )

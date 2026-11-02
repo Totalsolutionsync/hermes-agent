@@ -71,3 +71,39 @@ def test_store_write_carries_the_agent_chat_key():
     store.write(item)
     assert [("chatKey" in b) for b in client.bodies] == [False, True]
     assert client.bodies[1]["chatKey"] == "kynver-tab:tab9"
+
+
+def _store_for(agent):
+    from plugins.memory.kynver.integration import todo_chat_key
+
+    client = _Client()
+    store = KynverTodoStore(client, linkage=OperatingLinkage("plan", None, None, "hermes"), scope=lambda: "abc",
+                            chat_key=lambda: todo_chat_key(agent))
+    store.write([{"id": "1", "content": "x", "status": "pending"}])
+    return client.bodies[0]
+
+
+def test_gateway_runner_agent_without_attribute_uses_remembered_key_by_session_id():
+    ck.remember_chat_key(_req("kynver-tab:tab7"), "sess-gw")
+    agent = SimpleNamespace(session_id="sess-gw", _gateway_session_key="agent:main:api_server:dm:sess-gw")
+    assert _store_for(agent)["chatKey"] == "kynver-tab:tab7"
+
+
+def test_gateway_runner_agent_falls_back_to_id_in_session_key():
+    ck.remember_chat_key(_req("kynver-tab:tab8"), "hdr-sess")
+    agent = SimpleNamespace(session_id="internal-id", _gateway_session_key="agent:main:api_server:dm:hdr-sess")
+    assert _store_for(agent)["chatKey"] == "kynver-tab:tab8"
+
+
+def test_no_header_or_other_platform_sends_no_chat_key():
+    ck.remember_chat_key(_req(None), "sess-gw")
+    api = SimpleNamespace(session_id="sess-gw", _gateway_session_key="agent:main:api_server:dm:sess-gw")
+    tg = SimpleNamespace(session_id="tg-1", _gateway_session_key="agent:main:telegram:dm:123")
+    assert "chatKey" not in _store_for(api)
+    assert "chatKey" not in _store_for(tg)
+
+
+def test_attribute_still_wins():
+    ck.remember_chat_key(_req("kynver-tab:other"), "s")
+    agent = SimpleNamespace(session_id="s", _kynver_chat_key="kynver-tab:own")
+    assert _store_for(agent)["chatKey"] == "kynver-tab:own"
