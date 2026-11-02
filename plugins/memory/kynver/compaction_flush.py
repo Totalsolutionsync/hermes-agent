@@ -9,7 +9,7 @@ this module, which
    ``<memory-context>`` blocks, the protected tail, and anything this session already flushed);
 2. asks the auxiliary model (task ``kynver_compaction_flush``) for at most 8 durable items,
    with the same prompt rules as Kynver's own chat fold (``flush.extract.ts``);
-3. POSTs each item to ``/memory`` with ``sourceId: hermes:forge:flush`` and
+3. POSTs each item to ``/memory`` with ``sourceId: <source>:flush`` (``hermes:forge:flush`` for the default profile) and
    ``dedupeAgainstSimilar: 0.92`` — Kynver skips near-duplicates and meters the probe.
 
 Fail-open by construction: ``schedule`` only starts a background thread and returns, and the
@@ -35,13 +35,13 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from hermes_constants import get_hermes_home, hermes_home_key
 
 from .agentos_bridge import redact
+from .source_id import resolve_flush_source_id
 from .contract import MEMORY_WRITE_PATH
 from .prefetch_guard import retry_after_seconds
 from .quality_feedback import human_text
 
 logger = logging.getLogger(__name__)
 
-FLUSH_SOURCE_ID = "hermes:forge:flush"
 FLUSH_DEDUPE_SIMILARITY = 0.92
 TASK_KEY = "kynver_compaction_flush"
 
@@ -270,7 +270,7 @@ _SECURITY_CONTENT_RE = re.compile(
 )
 
 _SECURITY_SOURCE_RE = re.compile(
-    r"^(fortress:|security-fortress:|attack-simulation:|red-team:|security-probe:|hermes:forge:flush)",
+    r"^(fortress:|security-fortress:|attack-simulation:|red-team:|security-probe:|hermes:[a-z0-9_.-]+:flush)",
     re.IGNORECASE,
 )
 
@@ -315,13 +315,13 @@ def build_memory_body(item: dict[str, Any], *, session_id: str, provenance: dict
         "content": item["text"],
         "slug": f"hermes-flush-{digest}",
         "memoryType": _KIND_TO_MEMORY_TYPE[item["kind"]],
-        "sourceId": FLUSH_SOURCE_ID,
+        "sourceId": resolve_flush_source_id(),
         "confidence": _band(item["confidence"], held=held),
         "dedupeAgainstSimilar": FLUSH_DEDUPE_SIMILARITY,
         "metadata": metadata,
     }
     # Security lane content: hide from recall so Claude chats do not see it.
-    if is_security_lane_content(item["text"], item.get("slug", ""), FLUSH_SOURCE_ID):
+    if is_security_lane_content(item["text"], item.get("slug", ""), resolve_flush_source_id()):
         metadata["hiddenFromRecall"] = True
         metadata["securityLane"] = True
 
