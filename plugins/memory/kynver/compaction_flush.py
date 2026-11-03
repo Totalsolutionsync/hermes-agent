@@ -269,8 +269,13 @@ _SECURITY_CONTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Real security sources only. A Hermes flush source (``hermes:<agent>:flush``) names the agent, not
+# the chat, so it marks the security lane only when the agent itself is a security profile (Fortress,
+# red team). Every ordinary chat shares its agent's flush source; matching ``hermes:*:flush`` here hid
+# every compaction flush from recall.
 _SECURITY_SOURCE_RE = re.compile(
-    r"^(fortress:|security-fortress:|attack-simulation:|red-team:|security-probe:|hermes:forge:flush)",
+    r"^(fortress:|security-fortress:|attack-simulation:|red-team:|security-probe:|"
+    r"hermes:(fortress|security[a-z0-9_.-]*|red-team[a-z0-9_.-]*|attack-sim[a-z0-9_.-]*)(:flush)?$)",
     re.IGNORECASE,
 )
 
@@ -280,9 +285,26 @@ _SECURITY_SLUG_RE = re.compile(
 )
 
 
+def _profile_is_security_lane() -> bool:
+    """``kynver.security_lane: true`` in the running profile's config marks a security-chat profile."""
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        kynver = (load_config_readonly() or {}).get("kynver")
+    except Exception:
+        return False
+    return isinstance(kynver, dict) and kynver.get("security_lane") is True
+
+
 def is_security_lane_content(text: str, slug: str = "", source_id: str = "") -> bool:
-    """Return True if the content appears to be security/red-team material."""
-    if _SECURITY_SOURCE_RE.search(source_id):
+    """Return True if the content appears to be security/red-team material.
+
+    Decided by the content, the slug, a real security source, or a security-chat profile. Never by
+    the generic flush source alone (every chat's flush carries it).
+    """
+    if _SECURITY_SOURCE_RE.search(source_id or ""):
+        return True
+    if _profile_is_security_lane():
         return True
     if _SECURITY_SLUG_RE.search(slug):
         return True
