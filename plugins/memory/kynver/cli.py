@@ -14,6 +14,13 @@
                                               hand) or contradict current memory. Exits 1 with
                                               findings, 0 clean, 2 when Kynver can't be asked
                                               (the file-vs-file lint still prints).
+``hermes kynver skills status [--json]``       skill sync health: outbox depth, oldest age, parked
+                                              entries, last pull, migration phase.
+``hermes kynver skills migrate [--apply]``    one-time migration of the already-synced skills. Dry
+                                              run by default (added/changed/archived/rejected/
+                                              conflict with reasons); ``--apply`` backs up,
+                                              seeds bases and applies, resuming if interrupted.
+``hermes kynver skills sync``                 safety net: queue missed local edits, push, pull.
 """
 
 from __future__ import annotations
@@ -218,8 +225,53 @@ def cmd_lint_skill(args: Any, client: Any = None) -> int:
     return EXIT_UNAVAILABLE if report["memoryError"] else EXIT_CLEAN
 
 
+def _source_id() -> str:
+    from plugins.memory.kynver.skill_sync.service import load_skill_sync_config
+
+    return load_skill_sync_config()["source_id"]
+
+
+def cmd_skills_status(args: Any) -> int:
+    from plugins.memory.kynver.skill_sync import safety_net
+
+    report = safety_net.status_report()
+    print(json.dumps(report, indent=2) if args.json else safety_net.format_status(report))
+    return EXIT_CLEAN
+
+
+def cmd_skills_migrate(args: Any, client: Any = None) -> int:
+    from plugins.memory.kynver.skill_sync import migration
+
+    client = client or _client()
+    try:
+        if args.apply:
+            report = migration.apply(client, _source_id())
+        else:
+            report = migration.dry_run(client, _source_id())
+    except Exception as exc:  # health: allow BLE001 -- any client/IO failure; the journal is intact, re-run resumes
+        print(f"  Migration stopped: {exc}. Re-run the same command to resume.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    print(json.dumps(report, indent=2) if args.json else migration.format_report(report))
+    return EXIT_CLEAN
+
+
+def cmd_skills_sync(args: Any, client: Any = None) -> int:
+    from plugins.memory.kynver.skill_sync import safety_net
+
+    result = safety_net.sync_now(client or _client(), _source_id())
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return EXIT_UNAVAILABLE if result["status"] != "ok" else EXIT_CLEAN
+
+
 def kynver_command(args: Any) -> None:
     group = getattr(args, "kynver_command", None)
+    if group == "skills":
+        sub = getattr(args, "skills_command", None)
+        handlers = {"status": cmd_skills_status, "migrate": cmd_skills_migrate, "sync": cmd_skills_sync}
+        if sub not in handlers:
+            print("  Usage: hermes kynver skills status | migrate [--apply] | sync")
+            sys.exit(EXIT_UNAVAILABLE)
+        sys.exit(handlers[sub](args))
     if group == "memory" and getattr(args, "memory_command", None) == "lint-skill":
         sys.exit(cmd_lint_skill(args))
     sub = getattr(args, "blockers_command", None)
@@ -252,4 +304,13 @@ def register_cli(subparser) -> None:
     lint = memory_subs.add_parser("lint-skill", help="Report a skill whose files contradict each other or current memory (dry run)")
     lint.add_argument("skill_dir", help="Skill directory")
     lint.add_argument("--json", action="store_true", help="Machine-readable output")
+
+    skills = groups.add_parser("skills", help="Kynver skill sync: status, first-run migration, safety-net sync")
+    skills_subs = skills.add_subparsers(dest="skills_command")
+    status = skills_subs.add_parser("status", help="Outbox depth, oldest age, parked entries, last pull")
+    status.add_argument("--json", action="store_true", help="Machine-readable output")
+    migrate = skills_subs.add_parser("migrate", help="First-run migration (dry run unless --apply)")
+    migrate.add_argument("--apply", action="store_true", help="Back up, seed bases and apply (resumable)")
+    migrate.add_argument("--json", action="store_true", help="Machine-readable output")
+    skills_subs.add_parser("sync", help="Safety net: queue missed local edits, push, then pull")
     subparser.set_defaults(func=kynver_command)

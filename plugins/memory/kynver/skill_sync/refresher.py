@@ -16,6 +16,8 @@ Apply rules (plan §2.2 items 7-9):
   entry, or local hash != base) is never overwritten — the server version is
   stored beside it in ``.kynver.server.json``;
 * ``archived`` moves the folder into ``.archive/``;
+* a skill whose ``metadata.kynver.runtime`` is another runtime, or whose
+  ``bindings`` exclude this agent, is skipped (``scope.py``, H6);
 * the hash just applied becomes the sidecar ``baseHash``, so a pulled change is
   never pushed back.
 """
@@ -40,6 +42,7 @@ from .bundle import (
     read_bundle,
     write_bundle_dir,
 )
+from .scope import out_of_scope_reason
 from .store import (
     archive_root,
     backup_root,
@@ -193,9 +196,14 @@ def _record_rejection(slug: str, reason: str) -> None:
     update_state(rejections=rej[-MAX_REJECTIONS_KEPT:])
 
 
-def apply_pulled(item: dict[str, Any]) -> str:
-    """Apply one pull item. Returns applied|unchanged|pending|archived|rejected."""
+def apply_pulled(item: dict[str, Any], source_id: Optional[str] = None) -> str:
+    """Apply one pull item. Returns applied|unchanged|pending|archived|rejected|skipped.
+
+    ``skipped`` = out of scope for this runtime/agent (H6); nothing is touched.
+    """
     slug = item.get("slug") if isinstance(item, dict) else None
+    if isinstance(item, dict) and source_id and out_of_scope_reason(item, source_id):
+        return "skipped"
     try:
         bundle = bundle_from_pull(item)
     except BundleError as exc:
@@ -310,7 +318,7 @@ class Refresher:
                     raise RuntimeError("unexpected pull response")
                 for item in page.get("skills") or []:
                     try:
-                        outcome = apply_pulled(item)
+                        outcome = apply_pulled(item, self.source_id)
                     except Exception as exc:  # IO failure: stop here, retry the page next time
                         logger.warning("kynver skill sync: apply failed for %s: %s",
                                        (item or {}).get("slug"), exc)
