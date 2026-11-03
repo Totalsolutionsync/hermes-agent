@@ -45,6 +45,7 @@ from .contract import (
     task_update_path,
     todo_to_task_record,
 )
+from .source_id import agent_display_name, context_tag, resolve_source_id
 from .compaction_flush import CompactionFactFlusher, flush_enabled
 from .context import (
     fit_whole_items,
@@ -131,14 +132,11 @@ def classify_kynver_memory_scope(
     if metadata:
         for key in ("source", "sourceId", "domain", "scope", "contextTag"):
             value = str(metadata.get(key) or "").lower()
-            if "kynver" in value or "agentos" in value or "hermes:forge" in value:
+            if "kynver" in value or "agentos" in value or value.startswith("hermes:"):
                 return True
     return False
 
 RUNTIME = "hermes"
-CALL_SIGN = "Forge"
-CONTEXT_TAG = "hermes-forge"
-SOURCE_ID = "hermes:forge"
 _COMPACTION_FLUSH_BLOCKED_CONTEXTS = frozenset({"cron", "subagent", "delegated", "delegate"})
 DEFAULT_SEARCH_LIMIT = 5
 
@@ -405,15 +403,17 @@ class KynverMemoryProvider(MemoryProvider):
     def _provenance(self) -> dict[str, Any]:
         data = {
             "runtime": RUNTIME,
-            "callSign": CALL_SIGN,
-            "contextTag": CONTEXT_TAG,
-            "sourceId": SOURCE_ID,
+            "callSign": agent_display_name(),
+            "contextTag": context_tag(),
+            "sourceId": resolve_source_id(),
             "hermesSessionId": self._session_id,
             "agentOSSessionId": self._agentos_session_id,
             "platform": self._platform,
             "agentWorkspace": self._agent_workspace,
             "observedAt": _now_iso(),
         }
+        # Unnamed profile: no source / call sign; Kynver tags the write from the key's binding.
+        data = {k: v for k, v in data.items() if v is not None}
         if self._agent_identity:
             data["agentIdentity"] = self._agent_identity
         if self._user_id:
@@ -1067,7 +1067,7 @@ class KynverMemoryProvider(MemoryProvider):
                 read_back_reconciled=read_back,
             )
             tasks = [
-                todo_to_task_record(todo, SOURCE_ID)
+                todo_to_task_record(todo, resolve_source_id() or RUNTIME)
                 for todo in todos
                 if isinstance(todo, dict)
             ]
@@ -1172,7 +1172,7 @@ class KynverMemoryProvider(MemoryProvider):
                 "content": clean,
                 "slug": key or None,
                 "memoryType": memory_type or "fact",
-                "sourceId": SOURCE_ID,
+                "sourceId": resolve_source_id(),
                 "metadata": {**self._provenance(), **(metadata or {})},
             }
         )
@@ -1277,7 +1277,7 @@ class KynverMemoryProvider(MemoryProvider):
             meta.get("correctionEventKey") or meta.get("correction_event_key") or ""
         )
         idempotency_key = make_idempotency_key(
-            SOURCE_ID,
+            resolve_source_id() or RUNTIME,
             "memory.write",
             action_norm,
             envelope_id or self._agentos_session_id,
@@ -1401,7 +1401,7 @@ class KynverMemoryProvider(MemoryProvider):
             "count": len(fitted.included),
             "index": fitted.omitted,
             "estimatedTokens": fitted.estimated_tokens,
-            "sourceId": SOURCE_ID,
+            "sourceId": resolve_source_id(),
         })
 
     def _handle_check_manual_step(self, args: dict[str, Any]) -> str:
@@ -1491,7 +1491,7 @@ class KynverMemoryProvider(MemoryProvider):
                 "reasonClass": reason_class,
                 "key": key or None,
                 "memoryType": memory_type or None,
-                "sourceId": SOURCE_ID,
+                "sourceId": resolve_source_id(),
                 "assertedBySessionId": self._agentos_session_id or None,
             }
         )
@@ -1542,7 +1542,7 @@ class KynverMemoryProvider(MemoryProvider):
                     "a reason and a reasonClass; otherwise pass a new key."
                 )
             return _json_result(
-                {"success": True, "corrected": supersedes, "result": result, "sourceId": SOURCE_ID}
+                {"success": True, "corrected": supersedes, "result": result, "sourceId": resolve_source_id()}
             )
         try:
             meta: dict[str, Any] = {"tool": "kynver_memory_write"}
@@ -1567,7 +1567,7 @@ class KynverMemoryProvider(MemoryProvider):
                 "fact was false; the old entry is retired with an audit record). "
                 "Do not write a duplicate under a new key."
             )
-        return _json_result({"success": True, "result": result, "sourceId": SOURCE_ID})
+        return _json_result({"success": True, "result": result, "sourceId": resolve_source_id()})
 
     def _handle_task_create(self, args: dict[str, Any]) -> str:
         if self._tasks_disabled:
@@ -1579,7 +1579,7 @@ class KynverMemoryProvider(MemoryProvider):
             return tool_error("title is required")
         description = str(args.get("description") or "")
         idempotency_key = str(args.get("idempotencyKey") or "").strip() or make_idempotency_key(
-            SOURCE_ID,
+            resolve_source_id() or RUNTIME,
             "task.create",
             self._session_id,
             title,
@@ -1693,7 +1693,7 @@ class KynverMemoryProvider(MemoryProvider):
                 "payload": payload_body,
                 "artifactVisibility": args.get("artifactVisibility"),
                 "eventKey": str(args.get("eventKey") or "").strip() or make_idempotency_key(
-                    SOURCE_ID,
+                    resolve_source_id() or RUNTIME,
                     "task.event",
                     self._session_id,
                     task_id,
@@ -1722,7 +1722,7 @@ class KynverMemoryProvider(MemoryProvider):
                 "message": message,
                 "detail": detail,
                 "eventKey": str(args.get("eventKey") or "").strip() or make_idempotency_key(
-                    SOURCE_ID,
+                    resolve_source_id() or RUNTIME,
                     "task.steer",
                     self._session_id,
                     task_id,

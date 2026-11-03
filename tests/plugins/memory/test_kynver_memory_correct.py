@@ -18,6 +18,13 @@ import pytest
 SLUG = "test-agent"
 
 
+@pytest.fixture(autouse=True)
+def _forge_named_agent(_isolate_hermes_home):
+    from hermes_constants import get_hermes_home
+
+    (get_hermes_home() / "SOUL.md").write_text("Identity: your name is Forge.", encoding="utf-8")
+
+
 class _FakeKynver:
     """Minimal AgentOS memory API: keyed writes conflict when the content changes."""
 

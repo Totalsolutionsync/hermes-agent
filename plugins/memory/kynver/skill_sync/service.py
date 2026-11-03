@@ -19,6 +19,7 @@ import time
 from typing import Any, Dict, Optional
 
 from . import outbox, usage
+from ..source_id import skill_sync_source_id
 from .bundle import slug_for
 from .drain import Drainer
 from .refresher import Refresher
@@ -26,7 +27,6 @@ from .store import get_base, load_state
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SOURCE_ID = "hermes:forge"
 DEFAULT_REFRESH_SECONDS = 600
 TICK_SECONDS = 30
 _WRITE_ACTIONS = {"create", "edit", "patch", "write_file", "remove_file"}
@@ -46,7 +46,7 @@ def load_skill_sync_config() -> dict[str, Any]:
         "report_usage": bool(cfg.get("report_usage", False)),
         "initial_pull": bool(cfg.get("initial_pull", False)),
         "refresh_interval_seconds": max(60, int(cfg.get("refresh_interval_seconds") or DEFAULT_REFRESH_SECONDS)),
-        "source_id": str(cfg.get("source_id") or DEFAULT_SOURCE_ID),
+        "source_id": str(cfg.get("source_id") or skill_sync_source_id()),
     }
 
 

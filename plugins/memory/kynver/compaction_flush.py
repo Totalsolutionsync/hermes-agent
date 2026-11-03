@@ -9,7 +9,7 @@ this module, which
    ``<memory-context>`` blocks, the protected tail, and anything this session already flushed);
 2. asks the auxiliary model (task ``kynver_compaction_flush``) for at most 8 durable items,
    with the same prompt rules as Kynver's own chat fold (``flush.extract.ts``);
-3. POSTs each item to ``/memory`` with ``sourceId: hermes:forge:flush`` and
+3. POSTs each item to ``/memory`` with ``sourceId: <source>:flush`` (``hermes:forge:flush`` for Forge; omitted for an unnamed profile) and
    ``dedupeAgainstSimilar: 0.92`` — Kynver skips near-duplicates and meters the probe.
 
 Fail-open by construction: ``schedule`` only starts a background thread and returns, and the
@@ -35,13 +35,13 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from hermes_constants import get_hermes_home, hermes_home_key
 
 from .agentos_bridge import redact
+from .source_id import resolve_flush_source_id
 from .contract import MEMORY_WRITE_PATH
 from .prefetch_guard import retry_after_seconds
 from .quality_feedback import human_text
 
 logger = logging.getLogger(__name__)
 
-FLUSH_SOURCE_ID = "hermes:forge:flush"
 FLUSH_DEDUPE_SIMILARITY = 0.92
 TASK_KEY = "kynver_compaction_flush"
 
@@ -333,17 +333,19 @@ def build_memory_body(item: dict[str, Any], *, session_id: str, provenance: dict
         metadata["observedAt"] = item["observedAt"]
     if item["kind"] == "state":
         metadata["volatile"] = True  # "right now" truth; recall serves it as unverified
+    flush_source = resolve_flush_source_id()
     body: dict[str, Any] = {
         "content": item["text"],
         "slug": f"hermes-flush-{digest}",
         "memoryType": _KIND_TO_MEMORY_TYPE[item["kind"]],
-        "sourceId": FLUSH_SOURCE_ID,
         "confidence": _band(item["confidence"], held=held),
         "dedupeAgainstSimilar": FLUSH_DEDUPE_SIMILARITY,
         "metadata": metadata,
     }
+    if flush_source:  # unnamed profile: omitted, Kynver tags it from the key's binding
+        body["sourceId"] = flush_source
     # Security lane content: hide from recall so Claude chats do not see it.
-    if is_security_lane_content(item["text"], item.get("slug", ""), FLUSH_SOURCE_ID):
+    if is_security_lane_content(item["text"], item.get("slug", ""), flush_source or "hermes:agent:flush"):
         metadata["hiddenFromRecall"] = True
         metadata["securityLane"] = True
 

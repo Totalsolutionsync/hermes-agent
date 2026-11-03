@@ -57,6 +57,7 @@ class RaisingClient(FakeClient):
 def _isolate_kynver_env(tmp_path, monkeypatch):
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
+    (hermes_home / "SOUL.md").write_text("Identity: your name is Forge.", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("KYNVER_API_KEY", raising=False)
     monkeypatch.delenv("KYNVER_AGENT_OS_SLUG", raising=False)

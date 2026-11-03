@@ -57,6 +57,7 @@ class FakeKynver:
 def hermes_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
+    (home / "SOUL.md").write_text("Identity: your name is Forge.", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.delenv("KYNVER_API_KEY", raising=False)
     return home
