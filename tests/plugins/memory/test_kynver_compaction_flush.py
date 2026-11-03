@@ -117,6 +117,9 @@ def test_compression_posts_departing_facts_as_hermes_flush(hermes_home, extracte
         assert body["metadata"]["compaction"]["origin"] == "hermes"
     assert (decision["memoryType"], decision["confidence"]) == ("decision", "high")
     assert "reviewStatus" not in decision
+    # An ordinary chat's flush is recallable: the flush source alone never marks the security lane.
+    assert "securityLane" not in decision["metadata"]
+    assert "hiddenFromRecall" not in decision["metadata"]
     assert state["memoryType"] == "project_update" and state["metadata"]["volatile"] is True
     # Rests only on tool output: held for review, high confidence capped at medium.
     assert (state["reviewStatus"], state["confidence"]) == ("needs_review", "medium")
@@ -298,3 +301,32 @@ def test_memory_manager_compression_hook_reaches_kynver(hermes_home):
     assert manager.on_pre_compress(_transcript()) == ""
     _settle(provider)
     assert [b["sourceId"] for b in client.memory_posts] == ["hermes:forge:flush"]
+
+
+@pytest.mark.parametrize("source", ["hermes:forge:flush", "hermes:agent:flush", "hermes:shade:flush", ""])
+def test_flush_source_alone_never_marks_security_lane(hermes_home, source):
+    work = "Kynver PC app version 0.2.154 is released; the email to Steve about calculations was sent."
+    assert cf.is_security_lane_content(work, "hermes-flush-0123456789abcdef", source) is False
+    body = cf.build_memory_body(dict(ITEMS[0]), session_id="s1", provenance={})
+    assert "securityLane" not in body["metadata"] and "hiddenFromRecall" not in body["metadata"]
+
+
+@pytest.mark.parametrize("text,slug,source", [
+    ("Fortress probe found an open attack vector on the login route.", "", "hermes:forge:flush"),
+    ("Ordinary note.", "fortress-daily-1102", "hermes:forge:flush"),
+    ("Ordinary note.", "", "fortress:daily"),
+    ("Ordinary note.", "", "hermes:fortress:flush"),
+    ("Ordinary note.", "", "hermes:red-team:flush"),
+])
+def test_security_lane_by_content_slug_or_security_profile(hermes_home, text, slug, source):
+    assert cf.is_security_lane_content(text, slug, source) is True
+
+
+def test_security_chat_profile_flag_marks_flush_security_lane(hermes_home, monkeypatch):
+    from hermes_cli import config
+
+    # kynver.security_lane: true in the profile's config.yaml
+    monkeypatch.setattr(config, "load_config_readonly", lambda: {"kynver": {"security_lane": True}})
+    assert cf.is_security_lane_content("Ordinary note.", "", "hermes:forge:flush") is True
+    body = cf.build_memory_body(dict(ITEMS[0]), session_id="s1", provenance={})
+    assert body["metadata"]["securityLane"] is True and body["metadata"]["hiddenFromRecall"] is True
