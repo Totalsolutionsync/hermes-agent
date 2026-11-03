@@ -127,7 +127,13 @@ def test_two_profiles_in_one_process_do_not_share_a_cached_id(tmp_path, monkeypa
 @pytest.mark.parametrize(
     "sid", ["hermes:forge:flush", "hermes:shade:flush", "hermes:nova:flush"]
 )
-def test_flush_ids_of_any_agent_hit_security_exclusion(sid):
+def test_flush_ids_of_ordinary_agents_are_not_security_lane(sid):
+    # Every chat's flush carries its agent's flush id: the id alone must not hide it from recall.
+    assert not is_security_lane_content("benign", source_id=sid)
+
+
+@pytest.mark.parametrize("sid", ["hermes:fortress:flush", "hermes:red-team:flush"])
+def test_flush_ids_of_security_profiles_hit_security_exclusion(sid):
     assert is_security_lane_content("benign", source_id=sid)
 
 
