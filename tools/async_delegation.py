@@ -45,6 +45,10 @@ _refused_by: dict[tuple, set] = {}
 _FENCED_FIELDS = ("session_key", "parent_session_id")
 
 _DEFAULT_MAX_ASYNC_CHILDREN = 3
+# Pool slots that may wait for a free slot (``status="queued"`` handle) before a dispatch is refused outright. A
+# full pool used to make delegate_task run the work SYNCHRONOUSLY inside the parent's turn, which froze a gateway
+# chat for the child's whole runtime and held back every other completion (results only arrive between turns).
+_MAX_QUEUED_SLOTS = 32
 # Completed records retained (in memory and in the ledger) for status queries.
 _MAX_RETAINED_COMPLETED = 50
 _DURABLE_RETENTION_SECONDS = 7 * 24 * 60 * 60
@@ -732,7 +736,7 @@ def active_task_count() -> int:
         return sum(
             len(r.get("task_indexes") or r["goals"])
             if r.get("is_batch") and isinstance(r.get("goals"), (list, tuple)) and r["goals"] else 1
-            for r in _records.values() if r.get("status") in {"running", "finalizing"})
+            for r in _records.values() if r.get("status") in {"running", "finalizing"} and not r.get("_queued"))
 
 
 def _session_records(statuses, session_key: str, origin_ui_session_id: str, parent_session_id: str) -> list:
@@ -819,10 +823,14 @@ def _dispatch_admitted(
 ) -> dict[str, Any]:
     """Shared dispatch core for single (``goals is None``) and batch units. Capacity check +
     record insert happen under ONE lock hold so concurrent dispatches can't both pass the check
-    and exceed the cap. At capacity the dispatch is REJECTED (never queued) so a runaway model
-    can't pile up unbounded background work. ``slot_key`` names the pool slot the unit occupies
-    (default: its own id); the units of one delegate_task call share the first unit's id so
-    splitting a call into per-group completions never consumes more capacity than the call did."""
+    and exceed the cap. At capacity the unit is QUEUED (``{"status": "dispatched", "queued": True}``): it is admitted
+    and persisted like a running unit but its runner is not submitted until a slot frees
+    (``_promote_queued``, run after every finalize), so the caller's turn never blocks on it and
+    its result arrives as an ordinary completion event. Only past ``_MAX_QUEUED_SLOTS`` waiting
+    slots is a dispatch REJECTED, so a runaway model still can't pile up unbounded work.
+    ``slot_key`` names the pool slot the unit occupies (default: its own id); the units of one
+    delegate_task call share the first unit's id so splitting a call into per-group completions
+    never consumes more capacity than the call did."""
     worker_ledger()  # refuse unbound workers before publishing a live record
     is_batch = goals is not None
     label = " batch" if is_batch else ""
@@ -845,19 +853,8 @@ def _dispatch_admitted(
         # a forced finalization runs under the dispatcher's so it settles the same state.db.
         "_context": contextvars.copy_context(),
         # Stale-monitor bookkeeping (see _stale_monitor_loop).
-        "_progress_token": None, "_progress_ts": dispatched_at, "_interrupted_at": None}
-    with _records_lock:
-        if any((field, record[field]) in _refused_by for field in _FENCED_FIELDS):
-            return {"status": "rejected", "error": "This session was closed (exit or /new): no new background work."}
-        active_slots = {r.get("slot_key") or r["delegation_id"] for r in _records.values() if r.get("status") in _ACTIVE_STATES}
-        if record["slot_key"] not in active_slots and len(active_slots) >= max_async_children:
-            return {"status": "rejected", "error": capacity_error}
-        _records[delegation_id] = record
-        live_units = sum(1 for r in _records.values() if r.get("status") in _LIVE_STATES)
-    _persist_dispatch(record)
-    # Units of one call share a slot, so live units can exceed slots: size the pool by units or a
-    # unit queues behind a full pool and the stale monitor kills it before its child ever starts.
-    executor = _get_executor(max(max_async_children, live_units))
+        "_progress_token": None, "_progress_ts": dispatched_at, "_interrupted_at": None,
+        "_max_async_children": max_async_children}
 
     def _worker() -> None:
         result: dict[str, Any] = {}
@@ -878,12 +875,47 @@ def _dispatch_admitted(
 
     from hermes_cli.backend_retirement import retirement
 
+    # Context (session vars + approval callbacks) is captured HERE on the dispatching thread: a queued unit is
+    # submitted later from whichever thread frees its slot, and must still run as its own originating session.
+    record["_submit"] = propagate_context_to_thread(_worker)
+    record["_awaiting_persist"] = True  # promotion must not start a runner before its dispatch row exists
+    with _records_lock:
+        if any((field, record[field]) in _refused_by for field in _FENCED_FIELDS):
+            return {"status": "rejected", "error": "This session was closed (exit or /new): no new background work."}
+        active_slots = _active_slots_locked()
+        waiting = _queued_slots_locked()
+        # FIFO: while others wait for a slot, a new call queues behind them (promotion below may start it at once).
+        queued = record["slot_key"] not in active_slots and (len(active_slots) >= max_async_children or bool(waiting))
+        if queued:
+            if record["slot_key"] not in waiting and len(waiting) >= _MAX_QUEUED_SLOTS:
+                return {"status": "rejected", "error": (
+                    f"{capacity_error} {len(waiting)} more are already queued waiting for a slot, so this one was "
+                    "not accepted; dispatch it again after some of them finish.")}
+            record["_queued"] = True
+            record["_queued_at"] = time.time()
+        _records[delegation_id] = record
+    _persist_dispatch(record)
     # The outer dispatch reservation prevents a freeze during this handoff. Retain a worker
-    # reservation too: the stall monitor may finalize its registry record before it really exits.
+    # reservation too (released when the runner exits, or when a never-started unit is dropped):
+    # the stall monitor may finalize its registry record before it really exits.
     retirement.acquire()
+    with _records_lock:
+        record.pop("_awaiting_persist", None)
+    if queued:
+        logger.info("Async delegation%s %s queued: pool at capacity (%d slot(s) busy)",
+                    label, delegation_id, max_async_children)
+        _promote_queued()  # a slot may have freed while this unit was being persisted
+        with _records_lock:
+            still_queued = bool(record.get("_queued"))
+        if progress_fn is not None:
+            _ensure_stale_monitor()
+        if still_queued:
+            # "dispatched" so every caller's accepted-check holds; ``queued`` says it waits for a slot.
+            return {"status": "dispatched", "delegation_id": delegation_id, "queued": True,
+                    "queue_position": _queue_position(delegation_id)}
+        return {"status": "dispatched", "delegation_id": delegation_id}
     try:
-        future = executor.submit(propagate_context_to_thread(_worker))
-        future.add_done_callback(lambda _: retirement.release())
+        _submit_record(record)
     except Exception as exc:  # pragma: no cover — pool submit failure is rare
         retirement.release()
         with _records_lock:
@@ -897,6 +929,80 @@ def _dispatch_admitted(
     if progress_fn is not None:
         _ensure_stale_monitor()
     return {"status": "dispatched", "delegation_id": delegation_id}
+
+
+def _active_slots_locked() -> set:
+    """Pool slots held by started (or starting) units. Caller holds ``_records_lock``. Queued units wait OUTSIDE
+    the cap; ``finalizing`` units have already released theirs."""
+    return {r.get("slot_key") or r["delegation_id"] for r in _records.values()
+            if r.get("status") in _ACTIVE_STATES and not r.get("_queued")}
+
+
+def _queued_slots_locked() -> set:
+    """Pool slots whose units are all still waiting. Caller holds ``_records_lock``."""
+    return {r.get("slot_key") or r["delegation_id"] for r in _records.values()
+            if r.get("status") in _ACTIVE_STATES and r.get("_queued")} - _active_slots_locked()
+
+
+def _queue_position(delegation_id: str) -> int:
+    """1-based position of a queued unit's slot in the wait order (0 = not queued)."""
+    with _records_lock:
+        waiting = sorted((r for r in _records.values() if r.get("status") in _ACTIVE_STATES and r.get("_queued")),
+                         key=lambda r: r.get("_queued_at") or 0)
+        order: list = []
+        for r in waiting:
+            slot = r.get("slot_key") or r["delegation_id"]
+            if slot not in order:
+                order.append(slot)
+            if r["delegation_id"] == delegation_id:
+                return order.index(slot) + 1
+    return 0
+
+
+def _submit_record(record: dict[str, Any]) -> None:
+    """Submit a unit's runner to the shared executor (raises if the pool refuses it)."""
+    from hermes_cli.backend_retirement import retirement
+    with _records_lock:
+        started_units = sum(1 for r in _records.values() if r.get("status") in _LIVE_STATES and not r.get("_queued"))
+    # Units of one call share a slot, so started units can exceed slots: size the pool by units or a
+    # unit waits inside the executor and the stale monitor kills it before its child ever starts.
+    executor = _get_executor(max(int(record.get("_max_async_children") or 1), started_units))
+    future = executor.submit(record["_submit"])
+    future.add_done_callback(lambda _: retirement.release())
+
+
+def _promote_queued() -> int:
+    """Start queued units, oldest first, while their pool has a free slot (siblings sharing an already-started
+    slot always start). Units whose ``interrupt_fn`` already fired (``_force_start``) start regardless of capacity:
+    their runner only has to wind down and deliver the ``interrupted`` completion. Returns how many started."""
+    to_start: list[dict[str, Any]] = []
+    with _records_lock:
+        active = _active_slots_locked()
+        waiting = sorted(
+            (r for r in _records.values()
+             if r.get("status") in _ACTIVE_STATES and r.get("_queued") and not r.get("_awaiting_persist")),
+            key=lambda r: r.get("_queued_at") or 0)
+        for rec in waiting:
+            slot = rec.get("slot_key") or rec["delegation_id"]
+            cap = int(rec.get("_max_async_children") or 1)
+            if rec.get("_force_start") or slot in active or len(active) < cap:
+                rec["_queued"] = False
+                rec["_progress_ts"] = time.time()
+                active.add(slot)
+                to_start.append(rec)
+    for rec in to_start:
+        delegation_id = rec["delegation_id"]
+        logger.info("Async delegation %s: pool slot free, starting queued unit", delegation_id)
+        try:
+            _submit_record(rec)
+        except Exception as exc:  # pragma: no cover — pool submit failure is rare
+            from hermes_cli.backend_retirement import retirement
+            retirement.release()
+            logger.exception("Async delegation %s: queued unit could not start", delegation_id)
+            crash = _batch_crash if rec.get("is_batch") else _single_crash
+            ctx = (rec.get("_context") or contextvars.copy_context()).copy()  # a Context can't be entered twice
+            ctx.run(_finalize, delegation_id, crash(f"Failed to start queued delegation: {exc}", 0.0), "error")
+    return len(to_start)
 
 
 def dispatch_async_delegation(
@@ -974,16 +1080,26 @@ def _finalize(delegation_id: str, result: Any, status: str) -> None:
         record = _records.get(delegation_id)
         if record is None or record.get("status") not in _ACTIVE_STATES:
             return
+        never_started = bool(record.pop("_queued", False))
         record["status"] = "finalizing"
         record["completed_at"] = time.time()
         record["interrupt_fn"] = None  # drop the closure; child is done
         record["progress_fn"] = None  # stop stale-monitor sampling
+        record.pop("_submit", None)  # a queued runner must never start after its terminal event
         snapshot = dict(record)
+    if never_started:  # its runner never ran, so its done-callback will never drop the worker reservation
+        from hermes_cli.backend_retirement import retirement
+        retirement.release()
     _push_completion_event(snapshot, result(snapshot) if callable(result) else result, status)
     with _records_lock:
         if delegation_id in _records:
             _records[delegation_id]["status"] = status
         _prune_completed_locked()
+    # This unit's pool slot is free: start whatever was queued behind it (outside the lock).
+    try:
+        _promote_queued()
+    except Exception:  # pragma: no cover — never let promotion break a finalize
+        logger.exception("Async delegation: starting queued units after %s failed", delegation_id)
 
 
 def _push_completion_event(record: dict[str, Any], result: dict[str, Any], status: str) -> None:
@@ -1163,7 +1279,7 @@ def _stale_monitor_loop() -> None:
             _call_interrupt(fn, "Async delegation %s stall interrupt failed: %s", delegation_id)
         for delegation_id in expired:
             with _records_lock:
-                ctx = (_records.get(delegation_id) or {}).get("_context") or contextvars.copy_context()
+                ctx = ((_records.get(delegation_id) or {}).get("_context") or contextvars.copy_context()).copy()
             ctx.run(_finalize, delegation_id, lambda rec, d=delegation_id: _stalled_result(d, rec), "stalled")
         if not any_monitorable:
             return
@@ -1235,7 +1351,10 @@ def list_async_delegations() -> list[dict[str, Any]]:
         for r in _records.values():
             item = {k: v for k, v in r.items() if k not in {"interrupt_fn", "progress_fn"} and not k.startswith("_")}
             status = r.get("status")
-            if status in _ACTIVE_STATES:
+            if status in _ACTIVE_STATES and r.get("_queued"):
+                item["queued"] = True  # admitted, waiting for a pool slot; starts automatically
+                item["queued_seconds"] = round(now - (r.get("_queued_at") or now), 1)
+            elif status in _ACTIVE_STATES:
                 if r.get("_progress_ts"):
                     item["seconds_since_progress"] = round(now - r["_progress_ts"], 1)
                 if callable(r.get("progress_fn")):
@@ -1263,10 +1382,18 @@ def list_async_delegations() -> list[dict[str, Any]]:
 
 
 def _interrupt_records(targets: list[dict[str, Any]], caller: str, reason: str, msg: str) -> int:
-    """Call ``interrupt_fn`` on each record; log ``msg`` once; returns how many succeeded."""
+    """Call ``interrupt_fn`` on each record; log ``msg`` once; returns how many succeeded. A unit still queued for a
+    pool slot is started anyway (``_force_start``): its children are already stopped, so the runner only unwinds,
+    closes them and delivers the normal ``interrupted`` completion instead of waiting for capacity."""
     count = sum(
         _call_interrupt(r.get("interrupt_fn"), "%s: %s interrupt failed: %s", caller, r.get("delegation_id"))
         for r in targets)
+    with _records_lock:
+        forced = [r for r in targets if r.get("_queued") and r.get("status") in _ACTIVE_STATES]
+        for r in forced:
+            r["_force_start"] = True
+    if forced:
+        _promote_queued()
     if count:
         logger.info(msg, count, reason)
     return count

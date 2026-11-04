@@ -173,8 +173,8 @@ class TestSyncFallbacks:
                 res = _try_dispatch_background_run(_job('job-bg-06'))
         assert res is None
 
-    def test_pool_at_capacity_runs_inline(self):
-        """A rejected dispatch must not strand the already-taken claim."""
+    def test_refused_dispatch_runs_inline(self):
+        """A refused dispatch (queue overflow / submit failure — a full pool queues) must not strand the claim."""
         with _bound_session_key():
             with patch("tools.cronjob_tools.claim_job_for_fire", side_effect=lambda jid, **kw: {**_job(jid), "fire_claim": {"by": "bg-owner"}}), \
                  patch("tools.async_delegation.dispatch_async_delegation",
