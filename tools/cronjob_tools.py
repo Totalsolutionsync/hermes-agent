@@ -649,9 +649,13 @@ def _try_dispatch_background_run(
         origin_ui_session_id=origin_ui_session_id, origin_session_id=origin_session_id,
         max_async_children=max_async)
     if dispatch.get("status") == "dispatched":
-        return {"claimed": True, "dispatched": True, "delegation_id": dispatch.get("delegation_id")}
+        out = {"claimed": True, "dispatched": True, "delegation_id": dispatch.get("delegation_id")}
+        if dispatch.get("queued"):  # full pool: waits for a slot, then completes like any background run
+            out.update(queued=True, queue_position=dispatch.get("queue_position"))
+        return out
 
-    # Pool at capacity (or submit failure): the claim is already taken and must not be stranded.
+    # A full pool QUEUES (above); only a refused dispatch (wait queue overflow, closing session, submit failure)
+    # lands here. The claim is already taken and must not be stranded.
     logger.info(
         "cronjob run: background pool unavailable (%s); running job '%s' inline.",
         dispatch.get("error", "rejected"), job_name)

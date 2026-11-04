@@ -197,7 +197,7 @@ def test_rich_reinjection_block_is_self_contained():
         assert needle in text, f"missing {needle!r}"
 
 
-def test_dispatch_rejected_at_capacity():
+def test_dispatch_at_capacity_is_queued_not_rejected():
     ev = threading.Event()
 
     def blocker():
@@ -211,13 +211,27 @@ def test_dispatch_rejected_at_capacity():
         )
         assert r["status"] == "dispatched"
 
+    started = threading.Event()
+
+    def third():
+        started.set()
+        return {"status": "completed", "summary": "third done"}
+
+    t0 = time.monotonic()
     r3 = ad.dispatch_async_delegation(
         goal="task3", context=None, toolsets=None, role="leaf", model="m",
-        session_key="", runner=blocker, max_async_children=2,
+        session_key="", runner=third, max_async_children=2,
     )
-    assert r3["status"] == "rejected"
-    assert "capacity reached" in r3["error"]
-    ev.set()
+    # A full pool QUEUES the call and returns at once; it never runs in the caller.
+    assert time.monotonic() - t0 < 2.0
+    assert r3["status"] == "dispatched" and r3["queued"] is True and r3["queue_position"] == 1
+    assert not started.wait(0.3)  # still waiting for a slot
+    assert ad.active_task_count() == 2  # queued units do not count as running...
+    assert ad.active_count() == 3  # ...but are live (restart drain / health still see them)
+    ev.set()  # both slots free -> the queued unit starts and delivers its own completion
+    evt = _drain_for(r3["delegation_id"])
+    assert evt is not None and evt["status"] == "completed"
+    assert started.is_set()
 
 
 def test_interrupt_all_signals_running_children():
@@ -686,7 +700,7 @@ def test_delegate_task_background_uses_live_tui_agent_session_id(monkeypatch):
 
 
 def test_concurrent_dispatch_respects_capacity():
-    """Two threads racing dispatch with cap=1 must yield exactly one accept
+    """Two threads racing dispatch with cap=1 must yield exactly one started unit and one queued
     (capacity check and record insert are atomic under the records lock)."""
     gate = threading.Event()
 
@@ -712,9 +726,12 @@ def test_concurrent_dispatch_respects_capacity():
         t.start()
     for t in threads:
         t.join(timeout=10)
-    statuses = sorted(r["status"] for r in results)
-    assert statuses == ["dispatched", "rejected"]
+    assert [r["status"] for r in results] == ["dispatched", "dispatched"]
+    # Exactly one won the slot; the other was queued behind it (check + insert are atomic).
+    assert sorted(bool(r.get("queued")) for r in results) == [False, True]
+    assert ad.active_task_count() == 1
     gate.set()
+    assert all(_drain_all([r["delegation_id"] for r in results]).values())
 
 
 # ---------------------------------------------------------------------------
@@ -1004,7 +1021,9 @@ def test_units_of_one_call_share_a_single_capacity_slot():
     second = ad.dispatch_async_delegation_batch(delegation_id="deleg_call-2", task_indexes=[1],
                                                 slot_key="deleg_call-1", **common)
     other = ad.dispatch_async_delegation_batch(delegation_id="deleg_other", **common)
-    assert (first["status"], second["status"], other["status"]) == ("dispatched", "dispatched", "rejected")
+    assert (first["status"], second["status"], other["status"]) == ("dispatched", "dispatched", "dispatched")
+    # Siblings share the started slot; the other call waits for it instead of taking a second slot.
+    assert (first.get("queued"), second.get("queued"), other.get("queued")) == (None, None, True)
     assert ad.active_task_count() == 2
     gate.set()
 
@@ -1224,3 +1243,194 @@ def test_prune_never_evicts_live_records():
 
     assert {"live-stalling", "live-finalizing", "live-running"} <= survivors
     assert "done-0" not in survivors and len(survivors - {"live-stalling", "live-finalizing", "live-running"}) == ad._MAX_RETAINED_COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# Full pool -> QUEUED (never synchronous): admission, FIFO promotion, delivery,
+# interrupt of a queued unit, and the delegate_task tool surface.
+# ---------------------------------------------------------------------------
+
+
+def _blocking_runner(gate, started, name):
+    def run():
+        started.append(name)
+        gate.wait(timeout=30)
+        return {"status": "completed", "summary": f"{name} done"}
+    return run
+
+
+def _drain_all(ids, timeout=10.0):
+    """Collect the completion event of every id in *ids* (in any order); missing ids map to None."""
+    want, got = set(ids), {}
+    deadline = time.monotonic() + timeout
+    while want - set(got) and time.monotonic() < deadline:
+        if process_registry.completion_queue.empty():
+            time.sleep(0.02)
+            continue
+        evt = process_registry.completion_queue.get_nowait()
+        if evt.get("delegation_id") in want:
+            got[evt["delegation_id"]] = evt
+    return {i: got.get(i) for i in ids}
+
+
+def _dispatch(name, runner, cap, **kw):
+    return ad.dispatch_async_delegation(goal=name, context=None, toolsets=None, role="leaf", model="m",
+                                        session_key="", runner=runner, max_async_children=cap, **kw)
+
+
+def test_queued_units_start_fifo_one_per_freed_slot():
+    gates = {n: threading.Event() for n in ("a", "q1", "q2")}
+    started = []
+    a = _dispatch("a", _blocking_runner(gates["a"], started, "a"), 1)
+    q1 = _dispatch("q1", _blocking_runner(gates["q1"], started, "q1"), 1)
+    q2 = _dispatch("q2", _blocking_runner(gates["q2"], started, "q2"), 1)
+    assert a.get("queued") is None
+    assert (q1["queued"], q1["queue_position"], q2["queued"], q2["queue_position"]) == (True, 1, True, 2)
+    listed = {r["delegation_id"]: r for r in ad.list_async_delegations()}
+    assert listed[q1["delegation_id"]]["queued"] is True and "seconds_since_progress" not in listed[q1["delegation_id"]]
+    time.sleep(0.2)
+    assert started == ["a"]
+
+    gates["a"].set()  # one slot frees -> ONLY the oldest queued unit starts
+    assert _drain_for(a["delegation_id"])["status"] == "completed"
+    deadline = time.monotonic() + 3
+    while "q1" not in started and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.2)
+    assert started == ["a", "q1"]
+    assert ad._queue_position(q2["delegation_id"]) == 1
+
+    gates["q1"].set()
+    gates["q2"].set()
+    evts = _drain_all([q1["delegation_id"], q2["delegation_id"]])
+    assert evts[q1["delegation_id"]]["summary"] == "q1 done"
+    evt = evts[q2["delegation_id"]]
+    assert evt is not None and evt["status"] == "completed" and evt["summary"] == "q2 done"
+    assert started == ["a", "q1", "q2"]
+
+
+def test_new_dispatch_cannot_jump_the_queue():
+    """While units wait, a newcomer queues behind them even if a slot is momentarily free."""
+    gate, started = threading.Event(), []
+    a = _dispatch("a", _blocking_runner(gate, started, "a"), 1)
+    q1 = _dispatch("q1", _blocking_runner(gate, started, "q1"), 1)
+    with ad._records_lock:  # simulate a slot freeing with q1 not yet promoted
+        ad._records[a["delegation_id"]]["status"] = "finalizing"
+    q2 = _dispatch("q2", _blocking_runner(gate, started, "q2"), 1)
+    deadline = time.monotonic() + 3
+    while "q1" not in started and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.2)
+    assert q2["queued"] is True and "q2" not in started and "q1" in started
+    with ad._records_lock:
+        ad._records[a["delegation_id"]]["status"] = "running"
+    gate.set()
+    assert all(_drain_all([r["delegation_id"] for r in (a, q1, q2)]).values())
+
+
+def test_queue_overflow_is_rejected_not_run(monkeypatch):
+    monkeypatch.setattr(ad, "_MAX_QUEUED_SLOTS", 1)
+    gate, started = threading.Event(), []
+    a = _dispatch("a", _blocking_runner(gate, started, "a"), 1)
+    q1 = _dispatch("q1", _blocking_runner(gate, started, "q1"), 1)
+    ran = threading.Event()
+    over = _dispatch("over", lambda: ran.set() or {"status": "completed"}, 1)
+    assert q1["queued"] is True
+    assert over["status"] == "rejected" and "already queued" in over["error"]
+    assert not ran.wait(0.2)
+    gate.set()
+    assert all(_drain_all([a["delegation_id"], q1["delegation_id"]]).values())
+
+
+def test_interrupting_a_queued_unit_delivers_interrupted_without_waiting_for_a_slot():
+    gate, started = threading.Event(), []
+    a = _dispatch("a", _blocking_runner(gate, started, "a"), 1)
+    stopped = threading.Event()
+
+    def queued_runner():  # a real child stopped before its turn unwinds immediately
+        started.append("q")
+        return {"status": "interrupted", "summary": None, "error": "stopped"} if stopped.is_set() \
+            else {"status": "completed", "summary": "ran"}
+
+    q = _dispatch("q", queued_runner, 1, interrupt_fn=stopped.set)
+    assert q["queued"] is True
+    with ad._records_lock:
+        target = [ad._records[q["delegation_id"]]]
+    assert ad._interrupt_records(target, "test", "user stop", "Interrupted %d (%s)") == 1
+    evt = _drain_for(q["delegation_id"])
+    assert evt is not None and evt["status"] == "interrupted"
+    assert "a" in started and ad.active_task_count() == 1  # the running unit kept its slot
+    gate.set()
+    assert _drain_for(a["delegation_id"])["status"] == "completed"
+
+
+def test_finalizing_a_never_started_queued_unit_releases_its_worker_reservation(monkeypatch):
+    from hermes_cli.backend_retirement import retirement
+    calls = []
+    me = threading.get_ident()  # count only releases made by the finalize call (not by other workers)
+    monkeypatch.setattr(retirement, "release",
+                        lambda *a, **k: calls.append("release") if threading.get_ident() == me else None)
+    gate, started = threading.Event(), []
+    a = _dispatch("a", _blocking_runner(gate, started, "a"), 1)
+    ran = threading.Event()
+    q = _dispatch("q", lambda: ran.set() or {"status": "completed"}, 1)
+    calls.clear()  # each dispatch's outer retirement.work() reservation also released on this thread
+    ad._finalize(q["delegation_id"], {"status": "error", "error": "cancelled"}, "error")
+    assert calls == ["release"]
+    assert _drain_for(q["delegation_id"])["status"] == "error"
+    gate.set()
+    assert _drain_for(a["delegation_id"]) is not None
+    assert not ran.is_set()  # a finalized queued unit never starts later
+
+
+def _fake_delegate_env(monkeypatch, gate, started):
+    from unittest.mock import MagicMock
+    import tools.delegate_tool as dt
+    parent = MagicMock()
+    parent._delegate_depth = 0
+    parent.session_id = "sess"
+    parent._interrupt_requested = False
+    parent._active_children = []
+    parent._active_children_lock = None
+    child = MagicMock()
+    child._delegate_role = "leaf"
+
+    def slow_child(task_index, goal, child=None, parent_agent=None, **kw):
+        started.append(goal)
+        gate.wait(timeout=30)
+        return {"task_index": 0, "status": "completed", "summary": f"done: {goal}", "api_calls": 1,
+                "duration_seconds": 0.1, "model": "m", "exit_reason": "completed"}
+
+    creds = {"model": "m", "provider": None, "base_url": None, "api_key": None, "api_mode": None,
+             "command": None, "args": None}
+    monkeypatch.setattr(dt, "_build_child_agent", lambda **kw: child)
+    monkeypatch.setattr(dt, "_run_single_child", slow_child)
+    monkeypatch.setattr(dt, "_resolve_delegation_credentials", lambda *a, **k: creds)
+    monkeypatch.setattr(dt, "_get_max_async_children", lambda: 1, raising=False)
+    import tools.delegate_tool_config as dcfg
+    monkeypatch.setattr(dcfg, "_get_max_async_children", lambda: 1)
+    return dt, parent
+
+
+def test_delegate_task_with_full_pool_returns_queued_immediately_and_delivers_later(monkeypatch):
+    """The regression: a full pool used to run the subagent SYNCHRONOUSLY inside the chat turn."""
+    gate, started = threading.Event(), []
+    dt, parent = _fake_delegate_env(monkeypatch, gate, started)
+    first = json.loads(dt.delegate_task(goal="first job", background=True, parent_agent=parent))
+    assert first["status"] == "dispatched" and not first.get("queued")
+
+    t0 = time.monotonic()
+    out = json.loads(dt.delegate_task(goal="disk cleanup", background=True, parent_agent=parent))
+    assert time.monotonic() - t0 < 5.0  # returned while the pool is still full
+    assert out["status"] == "dispatched" and out["mode"] == "background"
+    assert out["queued"] is True and out["queue_position"] == 1
+    assert "QUEUED" in out["note"] and "SYNCHRONOUSLY" not in json.dumps(out)
+    assert "results" not in out
+    time.sleep(0.2)
+    assert started == ["first job"]  # the queued child did not run in the caller
+
+    gate.set()
+    evt = _drain_for(out["delegation_id"], timeout=10)
+    assert evt is not None and evt["type"] == "async_delegation"
+    assert evt["results"][0]["summary"] == "done: disk cleanup"
+    assert "disk cleanup" in format_process_notification(evt)

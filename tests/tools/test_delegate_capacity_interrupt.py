@@ -1,4 +1,4 @@
-"""A rejected background batch retains synchronous cancellation ownership."""
+"""A full background pool QUEUES the child (registry-owned, never run in the caller); refusals are wound down."""
 
 from __future__ import annotations
 
@@ -123,54 +123,95 @@ def registry_state(tmp_path, monkeypatch):
     async_delegation._reset_for_tests()
 
 
-@pytest.mark.parametrize("rejection", ["capacity", "schedule_failure", "partial_schedule_failure"])
-@pytest.mark.parametrize("stop_timing", ["running", "during_admission"])
-@pytest.mark.parametrize("stop_kind", ["soft", "hard"])
-def test_rejected_background_child_stops_with_parent(
-    registry_state, monkeypatch, tmp_path, rejection, stop_timing, stop_kind,
-):
-    parent, child = _Parent(), _ControlledChild()
-    background_child = pending_child = None
-    if rejection == "partial_schedule_failure":
-        # Three independent units: one accepted, one rejected, one not yet submitted.
-        # The model-facing batch width is legal under the configured limit.
-        (tmp_path / "config.yaml").write_text(
-            "delegation:\n  max_concurrent_children: 3\n  worktree_isolation: false\n"
-            "  independent_completions: true\n",
-            encoding="utf-8",
-        )
-        background_child, pending_child = _ControlledChild(), _ControlledChild()
-        background_child.session_id += "-background"
-        pending_child.session_id += "-pending"
-        batch = _batch(parent, background_child, child, pending_child)
-    else:
-        batch = _batch(parent, child)
-    occupied = threading.Event()
-    release_occupier = threading.Event()
-    admission_started = threading.Event()
-    continue_admission = threading.Event()
-    outcome = Future()
+def _occupy_only_slot(child_model):
+    occupied, release = threading.Event(), threading.Event()
 
     def occupy_slot():
         occupied.set()
-        assert release_occupier.wait(30)
+        assert release.wait(30)
         return {"status": "completed", "summary": "slot released"}
 
-    if rejection == "capacity":
-        accepted = async_delegation.dispatch_async_delegation(
-            goal="occupy the only slot", context=None, toolsets=None, role="leaf",
-            model=child.model, session_key="other-session", runner=occupy_slot,
-            max_async_children=1,
-        )
-        assert accepted["status"] == "dispatched"
-        assert occupied.wait(5)
-    elif rejection == "schedule_failure":
-        class RejectingExecutor:
-            def submit(self, *_args, **_kwargs):
-                raise RuntimeError("executor shut down")
+    accepted = async_delegation.dispatch_async_delegation(
+        goal="occupy the only slot", context=None, toolsets=None, role="leaf",
+        model=child_model, session_key="other-session", runner=occupy_slot, max_async_children=1,
+    )
+    assert accepted["status"] == "dispatched" and not accepted.get("queued")
+    assert occupied.wait(5)
+    return accepted, release
 
-        monkeypatch.setattr(async_delegation, "_get_executor", lambda _n: RejectingExecutor())
-    else:
+
+def _close_out(child):
+    if not child.finished.is_set():
+        child.hard_interrupt("test teardown")
+    child.allow_finish.set()
+    assert child.closed.wait(60)
+    assert child.close_count == 1
+    assert not child.closed_while_running
+
+
+def test_full_pool_queues_the_child_and_returns_immediately(registry_state):
+    """The regression: a full pool used to run the child SYNCHRONOUSLY inside the parent's turn."""
+    parent, child = _Parent(), _ControlledChild()
+    occupier, release_occupier = _occupy_only_slot(child.model)
+    try:
+        t0 = time.monotonic()
+        result = json.loads(_dispatch_background(_batch(parent, child)))
+        assert time.monotonic() - t0 < 5
+        assert result["status"] == "dispatched" and result["queued"] is True and result["queue_position"] == 1
+        assert "SYNCHRONOUSLY" not in result["note"] and "results" not in result
+        assert not child.started.wait(0.3), "a queued child must not run while the pool is full"
+        # Queued work is registry-owned like any accepted background child: the parent's stop does not reach it.
+        parent.interrupt("parent turn ends")
+        assert not child.stop_received.is_set()
+        assert parent._active_children == []
+
+        release_occupier.set()  # the slot frees -> the queued child starts on its own
+        assert registry_state.get(timeout=5)["delegation_id"] == occupier["delegation_id"]
+        assert child.started.wait(5)
+        assert async_delegation.interrupt_for_session(parent_session_id=parent.session_id) == 1
+        assert child.unwinding.wait(5)
+        child.allow_finish.set()
+        completion = registry_state.get(timeout=60)  # first child cleanup imports model_tools (slow when loaded)
+        assert completion["delegation_id"] == result["delegation_id"]
+        assert completion["results"][0]["status"] == "interrupted"
+    finally:
+        release_occupier.set()
+        _close_out(child)
+
+
+def test_stopping_a_queued_child_unwinds_it_without_waiting_for_a_slot(registry_state):
+    parent, child = _Parent(), _ControlledChild()
+    occupier, release_occupier = _occupy_only_slot(child.model)
+    try:
+        result = json.loads(_dispatch_background(_batch(parent, child)))
+        assert result["queued"] is True
+        child.allow_finish.set()
+        assert async_delegation.interrupt_for_session(parent_session_id=parent.session_id) == 1
+        completion = registry_state.get(timeout=60)  # delivered while the occupier still holds the slot
+        assert completion["delegation_id"] == result["delegation_id"]
+        assert completion["results"][0]["status"] == "interrupted"
+        assert child.unwinding.is_set()
+        assert async_delegation.active_task_count() == 1  # the occupier kept running
+    finally:
+        release_occupier.set()
+        _close_out(child)
+    assert registry_state.get(timeout=5)["delegation_id"] == occupier["delegation_id"]
+
+
+@pytest.mark.parametrize("rejection", ["schedule_failure", "partial_schedule_failure"])
+def test_refused_unit_is_wound_down_not_run_inline(registry_state, monkeypatch, tmp_path, rejection):
+    """A unit the registry refuses (scheduler failure / queue overflow) is stopped before it does any work and
+    reported as not_started — never executed synchronously in the caller's turn."""
+    parent, child = _Parent(), _ControlledChild()
+    child.allow_finish.set()  # its refusal unwind must not hang on the test gate
+    background_child = None
+    if rejection == "partial_schedule_failure":
+        (tmp_path / "config.yaml").write_text(
+            "delegation:\n  max_concurrent_children: 3\n  worktree_isolation: false\n"
+            "  independent_completions: true\n", encoding="utf-8")
+        background_child = _ControlledChild()
+        background_child.session_id += "-background"
+        batch = _batch(parent, background_child, child)
         executor = async_delegation._get_executor(3)
 
         class PartiallyRejectingExecutor:
@@ -182,93 +223,33 @@ def test_rejected_background_child_stops_with_parent(
                     raise RuntimeError("unit submission failed")
                 return executor.submit(*args, **kwargs)
 
-        partial_executor = PartiallyRejectingExecutor()
-        monkeypatch.setattr(async_delegation, "_get_executor", lambda _n: partial_executor)
+        partial = PartiallyRejectingExecutor()
+        monkeypatch.setattr(async_delegation, "_get_executor", lambda _n: partial)
+    else:
+        class RejectingExecutor:
+            def submit(self, *_args, **_kwargs):
+                raise RuntimeError("executor shut down")
 
-    dispatch = async_delegation.dispatch_async_delegation_batch
-    admissions = 0
-    accepted_ids = []
-
-    def pause_admission(**kwargs):
-        nonlocal admissions
-        admissions += 1
-        rejected_admission = 2 if background_child is not None else 1
-        if admissions == rejected_admission:
-            admission_started.set()
-            assert continue_admission.wait(5)
-        result = dispatch(**kwargs)
-        if result.get("status") == "dispatched":
-            accepted_ids.append(result["delegation_id"])
-        return result
-
-    monkeypatch.setattr(async_delegation, "dispatch_async_delegation_batch", pause_admission)
-
-    def run_dispatch():
-        try:
-            outcome.set_result(json.loads(_dispatch_background(batch)))
-        except BaseException as exc:
-            outcome.set_exception(exc)
-
-    worker = threading.Thread(target=run_dispatch, daemon=True)
-    worker.start()
+        monkeypatch.setattr(async_delegation, "_get_executor", lambda _n: RejectingExecutor())
+        batch = _batch(parent, child)
     try:
-        assert admission_started.wait(5)
+        result = json.loads(_dispatch_background(batch))
+        assert "SYNCHRONOUSLY" not in json.dumps(result)
+        refused = result["results"] if background_child is None else result["not_started"]
+        assert result["status"] == ("rejected" if background_child is None else "dispatched")
+        assert [r["status"] for r in refused] == ["not_started"]
+        assert child.finished.is_set() and child.close_count == 1
+        assert child.observed_interrupt[0].startswith("Not started")  # stopped before doing any work
         if background_child is not None:
             assert background_child.started.wait(5)
-        request_stop = parent.hard_interrupt if stop_kind == "hard" else parent.interrupt
-        stop_message = "user correction or stop request"
-        if stop_timing == "during_admission":
-            request_stop(stop_message)
-        continue_admission.set()
-        assert child.started.wait(5)
-        if stop_timing == "running":
-            request_stop(stop_message)
-
-        assert child.stop_received.wait(5), "fallback lost parent cancellation ownership"
-        assert child.unwinding.wait(5)
-        assert child.observed_interrupt == (stop_message, stop_kind == "hard")
-        if background_child is not None:
             assert not background_child.stop_received.is_set()
-            assert pending_child.stop_received.is_set(), "unsubmitted unit lost parent cancellation ownership"
-            assert not pending_child.started.is_set()
-        assert not outcome.done(), "dispatch returned while its child still owned resources"
-        assert child.close_count == 0
-        child.allow_finish.set()
-        result = outcome.result(timeout=5)
-        if background_child is None:
-            assert "SYNCHRONOUSLY" in result["note"]
-            assert result["results"][0]["status"] == "interrupted"
-        else:
-            assert result["status"] == "dispatched"
-            assert result["inline_results"][0]["status"] == "interrupted"
-            assert not background_child.stop_received.is_set()
-            assert pending_child.unwinding.wait(5)
-            assert pending_child.observed_interrupt == (stop_message, stop_kind == "hard")
-        assert child.finished.is_set()
-        assert child.close_count == 1
-        assert not child.closed_while_running
-        assert parent._active_children == []
+            assert async_delegation.interrupt_for_session(parent_session_id=parent.session_id) == 1
+            background_child.allow_finish.set()
+            assert registry_state.get(timeout=5)["delegation_id"] == result["delegation_id"]
     finally:
-        continue_admission.set()
-        if not child.finished.is_set():
-            child.hard_interrupt("test teardown")
-        child.allow_finish.set()
-        worker.join(timeout=5)
-        release_occupier.set()
+        _close_out(child)
         if background_child is not None:
-            async_delegation.interrupt_for_session(parent_session_id=parent.session_id)
-            for extra in (background_child, pending_child):
-                extra.allow_finish.set()
-                assert extra.closed.wait(5)
-                assert extra.finished.is_set()
-                assert extra.close_count == 1
-                assert not extra.closed_while_running
-            completed_ids = {registry_state.get(timeout=5)["delegation_id"] for _ in accepted_ids}
-            assert completed_ids == set(accepted_ids)
-        if rejection == "capacity":
-            completion = registry_state.get(timeout=5)
-            assert completion["delegation_id"] == accepted["delegation_id"]
-        assert not worker.is_alive()
+            _close_out(background_child)
 
 
 def test_accepted_background_child_keeps_registry_cancellation_ownership(registry_state):

@@ -120,8 +120,9 @@ def _get_worktree_isolation() -> bool:
 
 def _get_max_async_children() -> int:
     """Concurrency cap for background delegations == delegation.max_concurrent_children. At capacity a new async
-    dispatch is REJECTED (not queued) so a runaway model can't pile up unbounded background work; the caller then
-    runs synchronously. A leftover ``delegation.max_async_children`` key is ignored with a one-time warning."""
+    dispatch is QUEUED (returned at once, started when a slot frees); only an overflowing wait queue is rejected, and
+    the caller never runs the work synchronously. A leftover ``delegation.max_async_children`` key is ignored with a
+    one-time warning."""
     from tools.delegate_tool import _get_max_concurrent_children
     if _cfg().get("max_async_children") is not None:
         _warn_once(
