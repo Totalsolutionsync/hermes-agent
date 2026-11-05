@@ -91,6 +91,10 @@ Hardening invariants — each guards a real failure; don't weaken without answer
   payload, and only then drops the marker: a source-update relaunch (`-I`, no `PYTHONPATH`) or a
   post-restore re-exec must replay the whole worker, never land after the ack with the payload
   gone and no dependency boot.
+- **Kynver tabs (`cron/delivery_kynver.py`).** With Kynver configured, background output goes to
+  `kynver:updates` / `kynver:failures` (defaults and the meaning of `origin`); only
+  `[ACTION_NEEDED]` output also reaches the origin chat. The one-time load migration writes a
+  backup and `cron/.kynver_tabs_migrated` so it never rewrites jobs created after it.
 - Cron sessions pass `skip_memory=True`; memory providers intentionally do not run during cron.
 - Cron execution has its own session. Eligible continuable deliveries may mirror or seed the
   reply-facing conversation: origin, origin-less home fallback, user-written bare-platform home,
