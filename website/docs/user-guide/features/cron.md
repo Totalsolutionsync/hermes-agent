@@ -604,6 +604,8 @@ When scheduling jobs, you specify where the output goes:
 | `"qqbot"` | QQ Bot (Tencent QQ) | |
 | `"bot-chat"` | This profile's canonical Bot Chat — the bot reads the output and responds | Machine-local |
 | `"bot-chat:research"` | Another local profile's Bot Chat | Validated at create time |
+| `"kynver:updates"` | The agent's Kynver **Updates** tab | Default when Kynver is configured |
+| `"kynver:failures"` | The agent's Kynver **Failures** tab | Default `failure_deliver` when Kynver is configured |
 | `"all"` | Fan out to every connected home channel | Resolved at fire time |
 | `"telegram,discord"` | Fan out to a specific set of channels | Comma-separated list |
 | `"origin,all"` | Deliver to the origin **plus** every other connected channel | Combine any tokens |
@@ -643,6 +645,24 @@ error. A delivery failure does not count toward the job's `failure_streak`
 - If the canonical chat is open in a mailbox-capable Desktop/TUI backend, delivery is **durably queued immediately**, whether the bot is idle or busy. Only that live owner runs the incoming turn; cron does not start a competing CLI writer. A profile that has no Bot Chat yet gets one created on first delivery. If the target profile's gateway is not running, the run is recorded `delivery_failed` with the reason (the output stays in `hermes cron runs`; it is not redelivered automatically) and cron never starts its own Bot Chat turn.
 - **Queued is not completed.** Cron records receipt IDs and `queued`/`claimed` statuses in `last_delivery_queued`, with delivery outcome `queued` (neither delivered nor failed). A successful job shows `delivery_queued`; genuine errors on other targets still take precedence as delivery failures. The bot may complete later. The durable receipt in the target profile's `runtime/bot_live_delivery/<receipt-id>.json` is authoritative for the turn itself. For an agent job the send rides the gateway delivery queue, and once the gateway has handed it to the bot the run settles to `ok` (accepted, not answered) while `last_delivery_queued` keeps the receipt; a refused hand-off settles to `delivery_failed`. Script-only (`no_agent`) Bot Chat deliveries stay `delivery_queued`: cron never rewrites that history when the bot's turn later completes.
 - Rechecking the same execution inspects its existing receipt, even if the owner has disappeared. It never falls back to another writer after acceptance. `failed`, `cancelled`, or `ambiguous` receipts are not automatically replayed; inspect the chat and receipt before intentionally starting new work. Each new cron execution has a distinct delivery ID.
+
+### Kynver tabs (`kynver:updates`, `kynver:failures`)
+
+When the Kynver plugin is configured for the profile (`KYNVER_API_KEY` + `KYNVER_AGENT_OS_SLUG`,
+not disabled), scheduled output stays out of the main chat:
+
+- New jobs default to `deliver: kynver:updates` and `failure_deliver: kynver:failures`.
+- `origin` means the matching Kynver tab: results go to Updates, failure notices to Failures.
+- When the job's output starts (or ends) with a line beginning `[ACTION_NEEDED]`, the post is
+  flagged `action_needed` in Kynver **and** sent to the job's origin chat. This is the only case
+  that reaches the main chat. The marker itself is stripped.
+- On the first load after Kynver is configured, stored jobs whose `deliver` / `failure_deliver`
+  is `origin`, `local` or unset move to the tabs. A backup is written next to the store
+  (`cron/jobs.json.pre-kynver-tabs-<time>.bak`) and `cron/.kynver_tabs_migrated` records which
+  jobs moved. Jobs pinned to a `platform:chat_id` are left alone. Jobs created later are
+  never migrated, so a deliberate `deliver: local` stays local.
+- If Kynver is later removed from the profile, `kynver:*` targets fall back to `origin`.
+- Opt out with `kynver.cron_tabs: false` in `config.yaml`.
 
 ### Routing intent (`all`)
 

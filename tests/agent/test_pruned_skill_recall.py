@@ -188,3 +188,40 @@ def test_turn_context_appends_note_to_plugin_context_only_on_match(skills_home):
     unmatched = history + [{"role": "user", "content": UNRELATED}]
     assert _merge_pruned_skill_recall(unmatched, len(history), UNRELATED, "plugin ctx") == "plugin ctx"
     assert _merge_pruned_skill_recall(unmatched, len(history), UNRELATED, "") == ""
+
+
+REPORT_STEP = (
+    "3. **Layout pass:** check the layout of every page; the layout must keep the cover, the "
+    "layout grid and the summary aligned. Fix the layout before export, review the layout on "
+    "phone and desktop, and log each layout change. A report with a broken layout is not done; "
+    "redo the layout until it reads cleanly from the cover through the final appendix page, and "
+    "send the final layout for review with the PDF attached and a short note about what changed."
+)
+
+
+@pytest.fixture()
+def report_home(skills_home):
+    _write_skill(skills_home, "premium-report-pdfs", "Use when making PDF reports.", f"# Premium reports\n\n{REPORT_STEP}\n")
+    # "layout" is everyday vocabulary across installed skills (> 15% of them).
+    for name in ("deploy-pipeline", "video-shorts", "email-triage"):
+        path = skills_home / "skills" / "misc" / name / "SKILL.md"
+        path.write_text(path.read_text(encoding="utf-8") + "3. Keep the layout tidy.\n", encoding="utf-8")
+    return skills_home
+
+
+def test_common_word_repeated_in_a_long_step_does_not_trigger(report_home):
+    # The heavy (lower-density) route needs a rare term; "layout" is in 4/10 skills.
+    assert _note(_pruned_history("premium-report-pdfs"), "the layout of this kitchen is weird") == ""
+
+
+def test_conversational_words_never_trigger(report_home):
+    text = "Why are you taking so long to answer a quick question with one picture"
+    assert _note(_pruned_history("premium-report-pdfs", "pro-se-legal-case-support"), text) == ""
+
+
+def test_kynver_relay_hint_is_not_the_humans_words(skills_home):
+    from agent.pruned_skill_recall import human_words
+    from agent.relay_text import KYNVER_RELAY_APPENDED_TEXT
+
+    text = f"Which biscuits should I buy?\n\n{KYNVER_RELAY_APPENDED_TEXT[0]}\n\n[Image attached at: /tmp/x.jpg]\n[screenshot]"
+    assert human_words(text) == "Which biscuits should I buy?"

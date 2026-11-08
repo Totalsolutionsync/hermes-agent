@@ -41,6 +41,9 @@ _HEAVY_DENSITY = 0.04
 _DENSE_MIN_WORDS = 30
 # ...and the term is not everyday vocabulary across installed skills ("work", "test", "build").
 _DENSE_MAX_DF_RATIO = 0.3
+# The lower-density "heavy" route is looser, so its term must be rarer: "answer" (27% of skills,
+# 9x in one long premium-report-pdfs step) is not a topic.
+_HEAVY_MAX_DF_RATIO = 0.15
 # Two distinct message terms in ONE sentence of a step fire when each is used by at most this
 # share of installed skills.
 _PAIR_MAX_DF_RATIO = 0.04
@@ -85,6 +88,8 @@ _STOPWORDS = frozenset(
     going get got make made let lets one two way thing things something anything everything
     today tomorrow yesterday tonight now right sure good great fine also again maybe
     give take say ask call real line use used using help helping making doing
+    answer answers answered answering question questions reply replies replied respond response
+    message messages quick quickly long longer slow slower fast taking took wait waiting
     """.split()
 )
 
@@ -297,6 +302,9 @@ def human_words(message: Any) -> str:
         pass
     text = _MEMORY_CONTEXT_RE.sub("", text)
     text = _REPLY_QUOTE_RE.sub("", text, count=1)
+    from agent.relay_text import owner_words
+
+    text = owner_words(text)  # reply/report headers, Kynver's hints and attachment markers aren't the human's
     from tools.todo_tool import TODO_INJECTION_HEADER
 
     text = text.split(TODO_INJECTION_HEADER, 1)[0]  # compression's todo snapshot rides the user row
@@ -377,7 +385,11 @@ def _step_hits(
         and length >= _DENSE_MIN_WORDS
         and (
             (counts[t] >= _DENSE_TF and counts[t] / length >= _STEP_DENSITY)
-            or (counts[t] >= _HEAVY_TF and counts[t] / length >= _HEAVY_DENSITY)
+            or (
+                counts[t] >= _HEAVY_TF
+                and counts[t] / length >= _HEAVY_DENSITY
+                and df[t] <= total * _HEAVY_MAX_DF_RATIO
+            )
         )
     }
     if is_header:

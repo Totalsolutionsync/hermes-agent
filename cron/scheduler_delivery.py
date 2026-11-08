@@ -602,6 +602,11 @@ def _resolve_single_delivery_target(
     origin = _resolve_origin(job)
     if deliver_value == "local":
         return None
+    kynver_tab = _kynver.parse_tab_token(deliver_value)
+    if kynver_tab is not None:
+        if _kynver.kynver_tabs_active():
+            return _kynver.tab_target(job, kynver_tab)
+        deliver_value = "origin"  # Kynver no longer configured: today's default
     # Must precede the generic platform:chat_id split so the profile name isn't parsed as chat_id.
     bot_chat_profile = parse_bot_chat_deliver_token(deliver_value)
     if bot_chat_profile is not None:
@@ -886,6 +891,7 @@ def _resolve_delivery_targets(job: dict, *, for_failure: bool = False) -> list[d
             continue
         from_broadcast = raw.lower() in _ROUTING_TOKENS
         for part in _expand_routing_tokens(raw):
+            part = _kynver.origin_as_tab(part, for_failure)  # background origin -> Kynver tab
             target = _resolve_single_delivery_target(job, part, from_broadcast=from_broadcast)
             if not target:
                 continue
@@ -1750,7 +1756,7 @@ def _unresolved_delivery_outcome(job: dict, for_failure: bool) -> Optional[str]:
     deliver_value = _normalize_deliver_value(_delivery_lane_value(job, for_failure=for_failure))
     if deliver_value == "local":
         return None
-    if deliver_value == "origin":
+    if deliver_value == "origin" or _kynver.parse_tab_token(deliver_value) is not None:
         logger.info(
             # deliver=origin with no resolvable origin and no configured home channels: treat as local
             # rather than reporting an error. CLI-created jobs never capture a {platform, chat_id} origin,
@@ -1779,6 +1785,9 @@ def _deliver_result(
     if not targets:
         _record_delivery_verification(job, [])
         return _unresolved_delivery_outcome(job, for_failure)
+    # [ACTION_NEEDED] is the one case a Kynver-tab job also reaches the origin (main) chat.
+    queued_content = content
+    content, targets = _kynver.apply_action_needed(job, content, targets, _resolve_single_delivery_target)
 
     # Restart-safe workers have no live gateway adapters: hand the send back through a durable
     # queue so the current or replacement gateway performs it with relay/E2EE parity. The execution
@@ -1788,11 +1797,11 @@ def _deliver_result(
     external_execution = os.environ.get("_HERMES_CRON_EXTERNAL_WORKER", "")
     if (external_execution and adapters is None
             and external_execution == str(job.get("execution_id") or "")
-            and any(target["platform"] != BOT_CHAT_PLATFORM for target in targets)):
+            and any(t["platform"] not in (BOT_CHAT_PLATFORM, _kynver.KYNVER_PLATFORM) for t in targets)):
         from cron.delivery_queue import enqueue_and_wait
 
         _record_delivery_verification(job, [])
-        error = enqueue_and_wait(external_execution, job, content, for_failure=for_failure)
+        error = enqueue_and_wait(external_execution, job, queued_content, for_failure=for_failure)
         from cron.delivery_queue import get_status
         delivery_status = get_status(external_execution)
         if delivery_status and delivery_status["status"] == "suppressed":
@@ -1873,6 +1882,11 @@ def _deliver_result(
     delivery_errors = []
     suppressed_targets = 0  # local: `job` is snapshotted into durable deferred records mid-loop
     for target in targets:
+        if target["platform"] == _kynver.KYNVER_PLATFORM:  # the Failures tab is never chat-gated
+            tab_error = _kynver.deliver_to_tab(job, mirror_text, target, for_failure=for_failure)
+            if tab_error:
+                delivery_errors.append(tab_error)
+            continue
         # A failure notice for a platform that hides warning notifications is a suppressed
         # disposition, not a send; requested (non-failure) results are never gated.
         from gateway.warning_notifications import warning_notifications_enabled
@@ -1929,6 +1943,7 @@ def _deliver_result(
 
 # Late-bound origin namespace (see module docstring). Imported LAST so this module is fully
 # populated before ``scheduler`` re-exports from it.
+from cron import delivery_kynver as _kynver
 from cron import scheduler as _sched
 from cron import scheduler_delivery_origin as _origin
 from cron import scheduler_preflight as _preflight

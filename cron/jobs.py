@@ -1408,10 +1408,8 @@ def load_jobs() -> list[dict[str, Any]]:
         jobs = [j for j in jobs if isinstance(j, dict)]
         repair = repair or "non-object entries dropped"
     for job in jobs:
-        # A hand-edited "completed" that is not a non-negative int (null, "2", 1.0, -5, Infinity)
-        # would crash every counter reader (None += 1, "2" + 1), render as "None/3" / "2.0/3", or
-        # grant extra runs; normalize it once here so readers can trust a non-negative int.
-        # OverflowError: json.loads turns Infinity / 1e999 into float inf, and int(inf) raises.
+        # A hand-edited "completed" that is not a non-negative int (null, "2", 1.0, -5, Infinity;
+        # json.loads makes inf, int(inf) raises OverflowError) crashes counter readers: normalize.
         rep = job.get("repeat")
         if isinstance(rep, dict) and "completed" in rep and (
                 type(rep["completed"]) is not int or rep["completed"] < 0):
@@ -1420,6 +1418,9 @@ def load_jobs() -> list[dict[str, Any]]:
             except (TypeError, ValueError, OverflowError):
                 rep["completed"] = 0
             repair = repair or "invalid repeat.completed normalized"
+    from cron.delivery_kynver import migrate_jobs  # one-time move to Kynver tabs (backup kept)
+    if migrate_jobs(jobs, jobs_file, persist=bool(getattr(_jobs_lock_state, "depth", 0))):
+        repair = repair or "cron delivery defaults moved to Kynver Updates/Failures tabs"
     # Persist even an empty result, or an all-junk store repeats the repair on every tick.
     if repair:
         if not getattr(_jobs_lock_state, "depth", 0):
@@ -1795,7 +1796,8 @@ def create_job(
 ) -> dict[str, Any]:
     """Create a new cron job and return the stored record.
 
-    deliver defaults to "origin" when ``origin`` is given, else "local"; repeat None = forever.
+    deliver defaults to kynver:updates (failure_deliver kynver:failures) when Kynver is configured,
+    else "origin" when ``origin`` is given, else "local"; repeat None = forever.
     script: stdout is injected as prompt context, or with ``no_agent=True`` IS the job (stdout
     delivered verbatim, requires ``script``). context_from: job id(s) whose latest output is
     injected. workdir: absolute cwd for tools/scripts. monitor_script/monitor_url: cheap monitor
@@ -1810,14 +1812,13 @@ def create_job(
     if paused_reason is not None and not paused:
         raise ValueError("paused_reason requires paused=True.")
     parsed_schedule = parse_schedule(schedule)
-    # Normalize repeat: treat 0 or negative values as None (infinite). String forms
-    # ('forever'/'once'/numeric) coerce via normalize_repeat_value — the shared chokepoint with update paths
-    # (#66824/#64520/#7142/#71987/#95706).
+    # repeat <= 0 -> None (forever); 'forever'/'once'/numeric strings coerce via the chokepoint shared
+    # with the update paths (#66824/#64520/#7142/#71987/#95706).
     repeat = normalize_repeat_value(repeat)
     if parsed_schedule["kind"] == "once" and repeat is None:
         repeat = 1
-    if deliver is None:
-        deliver = "origin" if origin else "local"
+    from cron.delivery_kynver import creation_defaults  # Kynver tabs when configured
+    deliver, failure_deliver = creation_defaults(deliver, failure_deliver, origin)
     job_id = uuid.uuid4().hex[:12]
     now = _hermes_now().isoformat()
 
@@ -1884,9 +1885,8 @@ def create_job(
         "enabled_toolsets": f["enabled_toolsets"],
         "workdir": f["workdir"],
     }
-    # Optional keys are persisted only when explicitly set: an absent key falls back to global
-    # config (attach/reasoning) or to ``deliver`` (failure_deliver), byte-identical to pre-feature
-    # jobs.
+    # Optional keys persist only when set: absent falls back to global config (attach/reasoning) or
+    # to ``deliver`` (failure_deliver), byte-identical to pre-feature jobs.
     for key, value in (
         ("attach_to_session", normalized_attach), ("reasoning_effort", normalized_reasoning_effort),
         ("failure_deliver", f["failure_deliver"]), ("interpreter", f["interpreter"]),
