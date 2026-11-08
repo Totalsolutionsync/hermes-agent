@@ -107,6 +107,30 @@ def test_tab_delivery_posts_nothing_itself(kynver_on):
     assert kynver_on == []
 
 
+@pytest.mark.parametrize("kynver", [True, False])
+def test_preflight_lets_kynver_tab_jobs_run(kynver, cron_env, request):
+    """kynver:* has no gateway adapter to check: the forwarder posts it, or it falls back to origin.
+    Treating ``kynver`` as an unknown platform blocked every migrated job as blocked_config."""
+    from cron.scheduler_preflight import _preflight_check_delivery
+
+    if kynver:
+        request.getfixturevalue("kynver_on")
+    job = _job("j", deliver=kt.UPDATES_TARGET, failure_deliver=kt.FAILURES_TARGET,
+               origin=TELEGRAM_ORIGIN)
+    assert _preflight_check_delivery(job) is None
+    assert _preflight_check_delivery(dict(job, deliver="kynver:failures,local")) is None
+
+
+def test_preflight_still_blocks_a_bogus_platform_beside_kynver_tabs(kynver_on):
+    from cron.scheduler_preflight import _preflight_check_delivery
+
+    job = _job("j", deliver=kt.UPDATES_TARGET, failure_deliver="nosuchplatform:123")
+    err = _preflight_check_delivery(job)
+    assert err is not None and "'nosuchplatform' is not a known" in err
+    err = _preflight_check_delivery(_job("j", deliver="kynver:updates,bogus"))
+    assert err is not None and "'bogus' is not a known" in err
+
+
 def test_tabs_need_the_forwarder(kynver_on, tmp_path, monkeypatch):
     (tmp_path / ".kynver" / "hermes-cron-routes.json").unlink()
     assert not kt.kynver_tabs_active()

@@ -14,6 +14,7 @@ import logging
 import os
 from typing import Optional
 
+from cron.delivery_kynver import parse_tab_token as _parse_kynver_tab
 from cron.env_settings import cron_env_setting
 
 # Log-record parity with the origin module.
@@ -267,6 +268,11 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
                 continue
             # bot-chat targets deliver via a local subprocess; failures land in last_delivery_error.
             if _delivery.parse_bot_chat_deliver_token(part) is not None:
+                continue
+            # kynver:updates / kynver:failures tabs are posted by the Kynver cron forwarder, not a
+            # gateway adapter (and fall back to origin without Kynver), so there is no platform
+            # credential to check here.
+            if _parse_kynver_tab(part) is not None:
                 continue
             platform_parts.append(part.split(":", 1)[0].strip())
     if not platform_parts:
