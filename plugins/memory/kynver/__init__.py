@@ -607,16 +607,31 @@ class KynverMemoryProvider(MemoryProvider):
         return block
 
     def _standing_rules_turn_block(self, text: str, scope: str) -> str:
-        """Topic rules matched by this message; each topic set is shown once per session."""
+        """Topic rules the owner's words this turn are about; each topic set is shown once per session.
+
+        Relevance is the only gate (no rule-count cap): a matched topic arrives in full.
+        """
         if not getattr(self, "_standing_rules_topic_mode", False) or not (text or "").strip():
             return ""
         from urllib.parse import urlencode
 
+        from agent.relay_text import owner_words, split_reply_quote
+
         from .standing_rules import INSTRUCTION_POLICY_PATH, parse_topic_policy, topic_policy_turn_block
 
+        # Match on what the owner asked this turn. Kynver's appended hint, a report-answer
+        # header and a reply-quote header are not the owner's words (each attached kynver-dev
+        # to off-topic turns); the quote goes separately so Kynver judges it on substance.
+        _own, quote = split_reply_quote(text)
+        text = owner_words(text)
+        if not text:
+            return ""
+        params = {"text": text[:2000]}
+        if quote:
+            params["quote"] = quote[:1500]
         try:
             payload = self._require_client().get(
-                f"{INSTRUCTION_POLICY_PATH}?" + urlencode({"text": text[:2000]}),
+                f"{INSTRUCTION_POLICY_PATH}?" + urlencode(params),
                 timeout=min(self._client_timeout or 15, 15),
             )
             policy = parse_topic_policy(payload)

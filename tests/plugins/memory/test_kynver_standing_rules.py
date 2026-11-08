@@ -175,3 +175,45 @@ def test_topic_fetch_failure_fails_open():
     provider.system_prompt_block()
     provider._client = FakeClient(exc=RuntimeError("down"))
     assert provider._standing_rules_turn_block("draft an email", "s1") == ""
+
+
+class KynverDevClient(FakeClient):
+    """Stands in for Kynver's matcher: any 'kynver' in the sent text attaches the kynver-dev pack."""
+
+    def get(self, path, *, slug=None, timeout=None):
+        from urllib.parse import parse_qs, urlsplit
+
+        self.calls.append(path)
+        sent = parse_qs(urlsplit(path).query).get("text", [""])[0].lower()
+        if "kynver" in sent:
+            return _topic_payload("kynver-dev", "# Standing rules for this conversation's topics\n\n## Kynver development\n- Kynver dev rule body.")
+        return _topic_payload()
+
+
+def test_cooking_question_with_relay_hint_gets_no_kynver_dev_pack():
+    from agent.relay_text import KYNVER_RELAY_APPENDED_TEXT
+
+    provider = _provider(KynverDevClient())
+    provider.system_prompt_block()
+    turn = (
+        "Which sausage and biscuits should I buy? Make me a list.\n\n"
+        f"{KYNVER_RELAY_APPENDED_TEXT[0]}\n\n[Image attached at: /tmp/api_1.jpg]\n[screenshot]"
+    )
+    assert provider._standing_rules_turn_block(turn, "s1") == ""
+    sent = provider._client.calls[-1]
+    assert "Kynver+files" not in sent and "Image+attached" not in sent and "sausage" in sent
+
+
+def test_real_kynver_code_question_still_gets_the_pack():
+    provider = _provider(KynverDevClient())
+    provider.system_prompt_block()
+    block = provider._standing_rules_turn_block("Why does the Kynver harness typecheck fail?", "s1")
+    assert "Kynver dev rule body" in block
+
+
+def test_attachment_only_turn_makes_no_topic_call():
+    provider = _provider(KynverDevClient())
+    provider.system_prompt_block()
+    before = len(provider._client.calls)
+    assert provider._standing_rules_turn_block("[Image attached at: /tmp/a.jpg]\n[screenshot]", "s1") == ""
+    assert len(provider._client.calls) == before
