@@ -77,8 +77,44 @@ def _query(path: str, params: Mapping[str, Any]) -> str:
     return f"{path}?{urllib.parse.urlencode(clean, doseq=True)}"
 
 
+# The search query rides in the URL, and Node refuses a request head over 16 KiB with HTTP 431.
+# A cron turn's query is its whole per-run text (cron hint + previous output + script output +
+# prompt, 20+ KB), so the query is bounded here, not by each caller.
+MEMORY_QUERY_MAX_URL_BYTES = 4000
+_CRON_HINT_PREFIX = "[IMPORTANT: You are running as a scheduled cron job."
+_QUERY_JOIN = " … "
+
+
+def _encoded_len(text: str) -> int:
+    return len(urllib.parse.quote_plus(text))
+
+
+def bounded_memory_query(q: str, max_url_bytes: int = MEMORY_QUERY_MAX_URL_BYTES) -> str:
+    """*q* as a recall query that fits a URL: the cron run hint (boilerplate, no recall signal)
+    dropped, whitespace collapsed, then head + tail kept until the URL-encoded value fits
+    *max_url_bytes* (a cron job's own prompt sits at the end, after injected context)."""
+    text = str(q or "").strip()
+    if text.startswith(_CRON_HINT_PREFIX):
+        end = text.find("]\n\n")
+        text = text[end + 3:].strip() if end >= 0 else text
+    text = " ".join(text.split())
+    if _encoded_len(text) <= max_url_bytes:
+        return text
+    lo, hi = 0, len(text)  # largest total kept length whose head+tail fits
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        head = mid - mid // 2
+        candidate = text[:head] + _QUERY_JOIN + text[len(text) - mid // 2:] if mid // 2 else text[:head]
+        if _encoded_len(candidate) <= max_url_bytes:
+            lo = mid
+        else:
+            hi = mid - 1
+    head = lo - lo // 2
+    return (text[:head].rstrip() + _QUERY_JOIN + text[len(text) - lo // 2:].lstrip()) if lo // 2 else text[:head]
+
+
 def memory_search_path(*, q: str, k: int | None = None, **params: Any) -> str:
-    return _query(MEMORY_PATH, {"q": q, "k": k, **params})
+    return _query(MEMORY_PATH, {"q": bounded_memory_query(q), "k": k, **params})
 
 
 def task_path(task_id: str) -> str:

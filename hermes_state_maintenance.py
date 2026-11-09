@@ -19,6 +19,9 @@ logger = logging.getLogger("hermes_state")
 _LAST_ACTIVE_SQL = _sql_session_last_active("s")
 _TOKENS_SQL = "(COALESCE(s.input_tokens, 0) + COALESCE(s.output_tokens, 0))"
 _COST_SQL = "COALESCE(s.actual_cost_usd, s.estimated_cost_usd, 0)"
+# Sessions per prune delete transaction: small enough that the write lock is released every
+# few seconds even when each session carries thousands of FTS-indexed messages.
+_PRUNE_DELETE_BATCH = 25
 
 
 def _like(value: str) -> str:
@@ -379,7 +382,7 @@ class SessionMaintenanceMixin:
             raise ValueError("prune_sessions() never deletes open sessions: include_open is archive-only")
         where, where_params = self._prune_where(older_than_days, source, filters, whole_lineages=True)
         removed_ids: list[str] = []
-        def _do(conn):
+        def _select_and_retire(conn):
             cursor = conn.execute(f"SELECT s.id FROM sessions s WHERE {where}", where_params)
             session_ids = {row["id"] for row in cursor.fetchall()}
             if exclude_active_write_guards:
@@ -387,18 +390,33 @@ class SessionMaintenanceMixin:
             from hermes_state_mutation_retirement import prune_retired_tombstones, retire_prunable
             session_ids = retire_prunable(conn, sorted(session_ids))
             prune_retired_tombstones(conn)  # every prune pass also reclaims expired deletion tombstones
-            if not session_ids:
-                return 0
-            # Batched: a cron-heavy store prunes tens of thousands of ids in one call.
-            for chunk in _id_chunks(session_ids):
-                ph = _placeholders(chunk)
-                conn.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk)
-                conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
-                conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
+            return session_ids
+        # Selection + fencing commit first: from here no writer can land on these ids. The row
+        # deletes then commit in small batches, each its own short write transaction. One
+        # transaction for the whole sweep held the store's write lock for ~17 minutes on a 12 GB
+        # store (4,791 sessions, FTS + display triggers per message row), so every other write
+        # — API run admission, cron admission, turn-lease refresh — waited or failed meanwhile.
+        session_ids = self._execute_write(_select_and_retire)
+        try:
+            for chunk in _id_chunks(session_ids, _PRUNE_DELETE_BATCH):
+                def _delete_chunk(conn, chunk=chunk):
+                    ph = _placeholders(chunk)
+                    conn.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk)
+                    conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
+                    conn.execute(f"DELETE FROM sessions WHERE id IN ({ph})", chunk)
+                self._execute_write(_delete_chunk)  # idempotent under _execute_write's retry
                 removed_ids.extend(chunk)
-            self._delete_unreferenced_system_prompts(conn)
-            return len(session_ids)
-        count = self._execute_write(_do)
+        except BaseException:
+            # The committed batches are gone: still announce them (routes, live sessions, files).
+            # The rest stay fenced and the next prune pass selects them again.
+            if removed_ids:
+                emit_session_deleted(self, removed_ids, reason="prune", sessions_dir=sessions_dir)
+                if deleted_ids is not None:
+                    deleted_ids.extend(removed_ids)
+            raise
+        if session_ids:
+            self._execute_write(lambda conn: self._delete_unreferenced_system_prompts(conn))
+        count = len(session_ids)
         if count:
             emit_session_deleted(self, removed_ids, reason="prune", sessions_dir=sessions_dir)
         from hermes_state_media import collect_retired_media
