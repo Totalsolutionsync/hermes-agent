@@ -200,6 +200,8 @@ def test_observe_only_and_config_opt_out_record_nothing(hermes_home):
         '[IMPORTANT: The user has invoked the "github-pr-workflow" skill, indicating they want you to follow its '
         "instructions. The full skill content is loaded below.]\n\nRemember that CI must pass.",
         '[Replying to: "Both are relaunched, the last worker had already done most of it"]\n\nlooks good, ship it',
+        "[ASYNC DELEGATION COMPLETE — deleg_1]\nThe worker said this was already done.",
+        "[IMPORTANT: Background process proc_1 matched your watch pattern; it is already done.]",
         "Please dig into this\n\n<memory-context>\nWill said we agreed on Friday\n</memory-context>",
     ],
 )
@@ -222,3 +224,17 @@ def test_correction_after_reply_quote_is_still_detected(hermes_home):
 
     assert len(client.feedback) == 1
     assert "i already told" in client.feedback[0]["note"]
+
+
+def test_system_message_lookup_is_not_a_retrieval_miss(hermes_home):
+    from plugins.memory.kynver.quality_feedback import is_system_message
+
+    assert is_system_message("  [ASYNC DELEGATION COMPLETE — d]\nok")
+    assert not is_system_message("did the async delegation finish?")
+    client = FakeKynver()
+    provider = _provider(client)
+
+    provider._record_miss("[ASYNC DELEGATION COMPLETE — d] nothing found", "empty")
+    _settle(provider)
+
+    assert client.feedback == []

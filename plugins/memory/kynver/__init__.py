@@ -62,6 +62,7 @@ from .quality_feedback import (
     POST_TIMEOUT_SECONDS,
     QualityFeedbackReporter,
     detect_correction,
+    is_system_message,
     human_text,
     memory_ids,
     miss_reason,
@@ -478,6 +479,10 @@ class KynverMemoryProvider(MemoryProvider):
             )
 
     def _record_miss(self, query: str, reason: str) -> None:
+        # Cron jobs and harness notices (delegation results etc.) are not the owner
+        # asking for something; a failed lookup there is pipeline noise, not a memory miss.
+        if self._platform == "cron" or is_system_message(query):
+            return
         self._record_feedback("retrieval_miss", "negative", query, query_text=query, note=reason)
 
     def _record_retrieval(self, query: str, candidates: list, injected: list) -> None:
@@ -902,7 +907,7 @@ class KynverMemoryProvider(MemoryProvider):
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         self._turn_number = turn_number
-        phrase = "" if kwargs.get("author_is_bot") or self._platform == "cron" else detect_correction(message)
+        phrase = "" if kwargs.get("author_is_bot") or self._platform == "cron" or is_system_message(message) else detect_correction(message)
         if phrase:
             # correctionReasonClass stays unset: the daily scan / operator classifies it.
             self._record_feedback(

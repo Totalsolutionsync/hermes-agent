@@ -77,12 +77,26 @@ _REPLY_QUOTE_RE = re.compile(r'^\[Replying to[^\n]*?: ".*?"\]\n\n', re.DOTALL)
 _MEMORY_CONTEXT_RE = re.compile(r"<memory-context>.*?(?:</memory-context>|$)", re.DOTALL)
 
 
+# Harness-authored turns (background-process / delegation notices, compaction summaries,
+# cron output) arrive as user rows but nobody typed them.
+_SYSTEM_PREFIXES = (
+    "[System:", "[SYSTEM NOTICE", "[CONTEXT", "[PRIOR CONTEXT", "[IMPORTANT: Background",
+    "[Your active task list", "[Planning state preserved", "[ASYNC DELEGATION", "[OUT-OF-BAND",
+    "Cronjob Response:", _CRON_PREFIX,
+)
+
+
+def is_system_message(message: str) -> bool:
+    """True when *message* was written by the harness, not typed by a person."""
+    return (message or "").lstrip().startswith(_SYSTEM_PREFIXES)
+
+
 def human_text(message: str) -> str:
     """Only the words the human typed this turn: drops cron prompts, slash-skill bodies,
     the quoted bot message in a reply, and injected memory context. Those are agent- or
     system-authored, so a correction phrase inside them is not a correction."""
     text = message or ""
-    if text.startswith(_CRON_PREFIX):
+    if is_system_message(text):
         return ""
     try:
         from agent.skill_commands import extract_user_instruction_from_skill_message
